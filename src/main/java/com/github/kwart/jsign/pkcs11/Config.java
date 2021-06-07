@@ -231,7 +231,7 @@ final class Config {
         if (description != null) {
             return description;
         }
-        return "SunPKCS11-" + name + " using library " + library;
+        return "JSignPKCS11-" + name + " using library " + library;
     }
 
     int getSlotID() {

@@ -986,14 +986,14 @@ public final class JSignPKCS11 extends AuthProvider {
                     // not support many sessions. if we did, we might
                     // run out of sessions in the middle of a
                     // nextBytes() call where we cannot fail over.
-                    putService(new P11Service(token, SR, "PKCS11",
+                    putService(new P11Service(token, SR, "JSIGNPKCS11",
                         "com.github.kwart.jsign.pkcs11.P11SecureRandom", null,
                         PCKM_SECURERANDOM));
                 }
                 if (config.isEnabled(PCKM_KEYSTORE)) {
-                    putService(new P11Service(token, KS, "PKCS11",
+                    putService(new P11Service(token, KS, "JSIGNPKCS11",
                         "com.github.kwart.jsign.pkcs11.P11KeyStore",
-                        s("PKCS11-" + config.getName()),
+                        s("JSIGNPKCS11-" + config.getName()),
                         PCKM_KEYSTORE));
                 }
                 return null;
