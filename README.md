@@ -1,2 +1,7 @@
-# jsign-pkcs11
-SunPKCS11 fork with small fixes
+# JSignPKCS11 Security Provicer
+
+This project is a fork of `SunPKCS11` provider from OpenJDK 8.
+
+It includes a small change in digital signing - the `CKU_CONTEXT_SPECIFIC`-typed login is called before signing.
+
+The NSS modes are not supported!
