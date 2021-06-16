@@ -1,4 +1,4 @@
-# JSignPKCS11 Security Provicer
+# JSignPKCS11 Security Provider
 
 This project is a fork of `SunPKCS11` provider from OpenJDK 8.
 
