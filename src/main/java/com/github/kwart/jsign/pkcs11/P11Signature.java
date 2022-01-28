@@ -32,6 +32,8 @@ import java.nio.ByteBuffer;
 import java.security.*;
 import java.security.interfaces.*;
 import java.security.spec.AlgorithmParameterSpec;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import javax.security.auth.login.LoginException;
 
@@ -603,8 +605,7 @@ final class P11Signature extends SignatureSpi {
         try {
             token.provider.contextSpecificLogin(session.id());
         } catch (LoginException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
+            Logger.getLogger(getClass().getName()).log(Level.FINER, "Context specific login failed", e);
         }
 
         boolean doCancel = true;

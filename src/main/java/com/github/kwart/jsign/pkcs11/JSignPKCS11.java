@@ -27,7 +27,8 @@ package com.github.kwart.jsign.pkcs11;
 
 import java.io.*;
 import java.util.*;
-
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.security.*;
 import java.security.interfaces.*;
 
@@ -392,10 +393,12 @@ public final class JSignPKCS11 extends AuthProvider {
         return sb.toString();
     }
 
+    @Override
     public boolean equals(Object obj) {
         return this == obj;
     }
 
+    @Override
     public int hashCode() {
         return System.identityHashCode(this);
     }
@@ -423,6 +426,7 @@ public final class JSignPKCS11 extends AuthProvider {
             return new P11Service
                 (token, type, algorithm, className, aliases, mechanism);
         }
+        @Override
         public String toString() {
             return type + "." + algorithm;
         }
@@ -813,6 +817,7 @@ public final class JSignPKCS11 extends AuthProvider {
             this.provider = provider;
             enabled = true;
         }
+        @Override
         public void run() {
             int interval = provider.config.getInsertionCheckInterval();
             while (enabled) {
@@ -879,6 +884,7 @@ public final class JSignPKCS11 extends AuthProvider {
         this.token = null;
         // unregister all algorithms
         AccessController.doPrivileged(new PrivilegedAction<Object>() {
+            @Override
             public Object run() {
                 clear();
                 return null;
@@ -971,6 +977,7 @@ public final class JSignPKCS11 extends AuthProvider {
 
         // register algorithms in provider
         AccessController.doPrivileged(new PrivilegedAction<Object>() {
+            @Override
             public Object run() {
                 for (Map.Entry<Descriptor,Integer> entry
                         : supportedAlgs.entrySet()) {
@@ -1020,6 +1027,7 @@ public final class JSignPKCS11 extends AuthProvider {
             return (aliases == null) ? null : Arrays.asList(aliases);
         }
 
+        @Override
         public Object newInstance(Object param)
                 throws NoSuchAlgorithmException {
             if (token.isValid() == false) {
@@ -1103,6 +1111,7 @@ public final class JSignPKCS11 extends AuthProvider {
             }
         }
 
+        @Override
         public boolean supportsParameter(Object param) {
             if ((param == null) || (token.isValid() == false)) {
                 return false;
@@ -1167,6 +1176,7 @@ public final class JSignPKCS11 extends AuthProvider {
             return (key instanceof P11Key) && (((P11Key)key).token == token);
         }
 
+        @Override
         public String toString() {
             return super.toString() +
                 " (" + Functions.getMechanismName(mechanism) + ")";
@@ -1194,6 +1204,7 @@ public final class JSignPKCS11 extends AuthProvider {
      *  where <i>name</i> is the value returned by
      *  this provider's <code>getName</code> method
      */
+    @Override
     public void login(Subject subject, CallbackHandler handler)
         throws LoginException {
 
@@ -1361,6 +1372,22 @@ public final class JSignPKCS11 extends AuthProvider {
                     debug.println("user already logged in");
                 }
                 return;
+            } else if (pe.getErrorCode() == CKR_KEY_HANDLE_INVALID) {
+                // Gemalto Safenet token ends up here
+                // It probably should not (the pkcs11 spec says).
+                // http://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html
+                // https://docs.oasis-open.org/pkcs11/pkcs11-base/v3.0/pkcs11-base-v3.0.html
+                //
+                // C_Login Return values: CKR_ARGUMENTS_BAD, CKR_CRYPTOKI_NOT_INITIALIZED, CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY,
+                // CKR_DEVICE_REMOVED, CKR_FUNCTION_CANCELED, CKR_FUNCTION_FAILED, CKR_GENERAL_ERROR, CKR_HOST_MEMORY, CKR_OK,
+                // CKR_OPERATION_NOT_INITIALIZED, CKR_PIN_INCORRECT, CKR_PIN_LOCKED, CKR_SESSION_CLOSED,
+                // CKR_SESSION_HANDLE_INVALID, CKR_SESSION_READ_ONLY_EXISTS, CKR_USER_ALREADY_LOGGED_IN,
+                // CKR_USER_ANOTHER_ALREADY_LOGGED_IN, CKR_USER_PIN_NOT_INITIALIZED, CKR_USER_TOO_MANY_TYPES,
+                // CKR_USER_TYPE_INVALID.
+                if (debug != null) {
+                    debug.println("C_Login returned error code: CKR_KEY_HANDLE_INVALID. Ignoring.");
+                }
+                return;
             } else if (pe.getErrorCode() == CKR_PIN_INCORRECT) {
                 FailedLoginException fle = new FailedLoginException();
                 fle.initCause(pe);
@@ -1387,6 +1414,7 @@ public final class JSignPKCS11 extends AuthProvider {
      *  where <i>name</i> is the value returned by
      *  this provider's <code>getName</code> method
      */
+    @Override
     public void logout() throws LoginException {
 
         // security check
@@ -1469,6 +1497,7 @@ public final class JSignPKCS11 extends AuthProvider {
      *  where <i>name</i> is the value returned by
      *  this provider's <code>getName</code> method
      */
+    @Override
     public void setCallbackHandler(CallbackHandler handler) {
 
         // security check
@@ -1510,6 +1539,7 @@ public final class JSignPKCS11 extends AuthProvider {
 
                 CallbackHandler myHandler = AccessController.doPrivileged
                     (new PrivilegedExceptionAction<CallbackHandler>() {
+                    @Override
                     public CallbackHandler run() throws Exception {
 
                         String defaultHandler =
@@ -1540,9 +1570,9 @@ public final class JSignPKCS11 extends AuthProvider {
 
             } catch (PrivilegedActionException pae) {
                 // ok
+                Logger.getLogger(getClass().getName()).log(Level.FINEST, "Loading the default callback handler failed", pae);
                 if (debug != null) {
                     debug.println("Unable to load default callback handler");
-                    pae.printStackTrace();
                 }
             }
         }
