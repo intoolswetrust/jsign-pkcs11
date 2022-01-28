@@ -7,7 +7,7 @@ on:
         description: 'Version to be released (e.g. 1.0.1).'
         required: true
       next-snapshot-version:
-        description: 'Version to be set after the release (e.g. 1.1-SNAPSHOT).'
+        description: 'Version to be set after the release (e.g. 1.1.0-SNAPSHOT).'
         required: true
 
 env:
