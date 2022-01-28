@@ -1,0 +1,23 @@
+name: PR builder
+on:
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build:
+    name: Build and run tests
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'intoolswetrust'
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Apache Maven Central
+        uses: actions/setup-java@v2
+        with:
+          java-version: 8
+          distribution: 'adopt'
+
+      - name: Build
+        run: |
+          mvn clean package
