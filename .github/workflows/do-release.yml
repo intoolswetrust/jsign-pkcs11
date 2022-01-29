@@ -1,4 +1,4 @@
-name: Do Release
+name: Do Release (Don't change the main branch during the workflow run!)
 
 on:
   workflow_dispatch:
@@ -41,7 +41,9 @@ jobs:
           mvn deploy -B -Prelease -DskipTests
           mvn versions:set -B -DgenerateBackupPoms=false -DnewVersion=${{ github.event.inputs.next-snapshot-version }}
           git commit -am "Next version is ${{ github.event.inputs.next-snapshot-version }}"
-          git push origin v${{ github.event.inputs.release-version }} main
+          git push origin v${{ github.event.inputs.release-version }}
+          # force push
+          git push -f origin main
         env:
           MAVEN_USERNAME: ${{ secrets.OSSRH_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
