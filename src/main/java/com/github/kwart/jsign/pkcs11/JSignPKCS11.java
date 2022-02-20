@@ -141,7 +141,10 @@ public final class JSignPKCS11 extends AuthProvider {
         long slotID = config.getSlotID();
         int slotListIndex = config.getSlotListIndex();
 
-//        boolean useSecmod = config.getNssUseSecmod();
+        boolean useSecmod = config.getNssUseSecmod();
+        if (useSecmod) {
+            throw new ProviderException("The JSignPKCS11 doesn't support NSS-mode");
+        }
 //        boolean nssUseSecmodTrust = config.getNssUseSecmodTrust();
 //        Module nssModule = null;
 //

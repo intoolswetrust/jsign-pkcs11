@@ -433,7 +433,7 @@ final class Config {
             } else if (word.equals("nssModule")) {
                 nssModule = parseStringEntry(word);
                 nssUseSecmod = true;
-//            } else if (word.equals("nssDbMode")) {
+            } else if (word.equals("nssDbMode")) {
 //                String mode = parseStringEntry(word);
 //                if (mode.equals("readWrite")) {
 //                    nssDbMode = Secmod.DbMode.READ_WRITE;
@@ -444,7 +444,7 @@ final class Config {
 //                } else {
 //                    throw excToken("nssDbMode must be one of readWrite, readOnly, and noDb:");
 //                }
-//                nssUseSecmod = true;
+                nssUseSecmod = true;
             } else if (word.equals("nssNetscapeDbWorkaround")) {
                 nssNetscapeDbWorkaround = parseBooleanEntry(word);
                 nssUseSecmod = true;
