@@ -36,6 +36,7 @@ import java.security.spec.*;
 import javax.crypto.*;
 import javax.crypto.interfaces.*;
 import javax.crypto.spec.*;
+import javax.security.auth.callback.CallbackHandler;
 
 import sun.security.rsa.RSAUtil.KeyType;
 import sun.security.rsa.RSAPublicKeyImpl;
@@ -88,6 +89,8 @@ abstract class P11Key implements Key, Length {
 
     // flags indicating whether the key is a token object, sensitive, extractable
     final boolean tokenObject, sensitive, extractable;
+
+    volatile char[] qPin;
 
     private final NativeKeyHolder keyIDHolder;
 
@@ -152,12 +155,14 @@ abstract class P11Key implements Key, Length {
     }
 
     // see JCA spec
+    @Override
     public final String getAlgorithm() {
         token.ensureValid();
         return algorithm;
     }
 
     // see JCA spec
+    @Override
     public final byte[] getEncoded() {
         byte[] b = getEncodedInternal();
         return (b == null) ? null : b.clone();
@@ -165,6 +170,7 @@ abstract class P11Key implements Key, Length {
 
     abstract byte[] getEncodedInternal();
 
+    @Override
     public boolean equals(Object obj) {
         if (this == obj) {
             return true;
@@ -196,6 +202,7 @@ abstract class P11Key implements Key, Length {
         return MessageDigest.isEqual(thisEnc, otherEnc);
     }
 
+    @Override
     public int hashCode() {
         // hashCode() should never throw exceptions
         if (token.isValid() == false) {
@@ -229,6 +236,7 @@ abstract class P11Key implements Key, Length {
         return new KeyRep(type, getAlgorithm(), format, getEncoded());
     }
 
+    @Override
     public String toString() {
         token.ensureValid();
         String s1 = token.provider.getName() + " " + algorithm + " " + type
@@ -420,10 +428,12 @@ abstract class P11Key implements Key, Length {
             super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
         }
         // XXX temporary encoding for serialization purposes
+        @Override
         public String getFormat() {
             token.ensureValid();
             return null;
         }
+        @Override
         byte[] getEncodedInternal() {
             token.ensureValid();
             return null;
@@ -437,6 +447,7 @@ abstract class P11Key implements Key, Length {
                 int keyLength, CK_ATTRIBUTE[] attributes) {
             super(SECRET, session, keyID, algorithm, keyLength, attributes);
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             if (sensitive || (extractable == false)) {
@@ -445,6 +456,7 @@ abstract class P11Key implements Key, Length {
                 return "RAW";
             }
         }
+        @Override
         byte[] getEncodedInternal() {
             token.ensureValid();
             if (getFormat() == null) {
@@ -490,10 +502,12 @@ abstract class P11Key implements Key, Length {
             this.majorVersion = major;
             this.minorVersion = minor;
         }
+        @Override
         public int getMajorVersion() {
             return majorVersion;
         }
 
+        @Override
         public int getMinorVersion() {
             return minorVersion;
         }
@@ -535,10 +549,12 @@ abstract class P11Key implements Key, Length {
             qe = attributes[6].getBigInteger();
             coeff = attributes[7].getBigInteger();
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -553,34 +569,42 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getModulus() {
             fetchValues();
             return n;
         }
+        @Override
         public BigInteger getPublicExponent() {
             fetchValues();
             return e;
         }
+        @Override
         public BigInteger getPrivateExponent() {
             fetchValues();
             return d;
         }
+        @Override
         public BigInteger getPrimeP() {
             fetchValues();
             return p;
         }
+        @Override
         public BigInteger getPrimeQ() {
             fetchValues();
             return q;
         }
+        @Override
         public BigInteger getPrimeExponentP() {
             fetchValues();
             return pe;
         }
+        @Override
         public BigInteger getPrimeExponentQ() {
             fetchValues();
             return qe;
         }
+        @Override
         public BigInteger getCrtCoefficient() {
             fetchValues();
             return coeff;
@@ -611,10 +635,12 @@ abstract class P11Key implements Key, Length {
             n = attributes[0].getBigInteger();
             d = attributes[1].getBigInteger();
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -632,10 +658,12 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getModulus() {
             fetchValues();
             return n;
         }
+        @Override
         public BigInteger getPrivateExponent() {
             fetchValues();
             return d;
@@ -664,10 +692,12 @@ abstract class P11Key implements Key, Length {
             n = attributes[0].getBigInteger();
             e = attributes[1].getBigInteger();
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -681,14 +711,17 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getModulus() {
             fetchValues();
             return n;
         }
+        @Override
         public BigInteger getPublicExponent() {
             fetchValues();
             return e;
         }
+        @Override
         public String toString() {
             fetchValues();
             return super.toString() +  "\n  modulus: " + n
@@ -726,10 +759,12 @@ abstract class P11Key implements Key, Length {
                 attributes[3].getBigInteger()
             );
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -744,14 +779,17 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getY() {
             fetchValues();
             return y;
         }
+        @Override
         public DSAParams getParams() {
             fetchValues();
             return params;
         }
+        @Override
         public String toString() {
             fetchValues();
             return super.toString() +  "\n  y: " + y + "\n  p: " + params.getP()
@@ -789,10 +827,12 @@ abstract class P11Key implements Key, Length {
                 attributes[3].getBigInteger()
             );
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -807,10 +847,12 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getX() {
             fetchValues();
             return x;
         }
+        @Override
         public DSAParams getParams() {
             fetchValues();
             return params;
@@ -845,10 +887,12 @@ abstract class P11Key implements Key, Length {
                 attributes[2].getBigInteger()
             );
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -866,14 +910,17 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getX() {
             fetchValues();
             return x;
         }
+        @Override
         public DHParameterSpec getParams() {
             fetchValues();
             return params;
         }
+        @Override
         public int hashCode() {
             if (token.isValid() == false) {
                 return 0;
@@ -881,6 +928,7 @@ abstract class P11Key implements Key, Length {
             fetchValues();
             return Objects.hash(x, params.getP(), params.getG());
         }
+        @Override
         public boolean equals(Object obj) {
             if (this == obj) return true;
             // equals() should never throw exceptions
@@ -927,10 +975,12 @@ abstract class P11Key implements Key, Length {
                 attributes[2].getBigInteger()
             );
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -948,19 +998,23 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getY() {
             fetchValues();
             return y;
         }
+        @Override
         public DHParameterSpec getParams() {
             fetchValues();
             return params;
         }
+        @Override
         public String toString() {
             fetchValues();
             return super.toString() +  "\n  y: " + y + "\n  p: " + params.getP()
                 + "\n  g: " + params.getG();
         }
+        @Override
         public int hashCode() {
             if (token.isValid() == false) {
                 return 0;
@@ -968,6 +1022,7 @@ abstract class P11Key implements Key, Length {
             fetchValues();
             return Objects.hash(y, params.getP(), params.getG());
         }
+        @Override
         public boolean equals(Object obj) {
             if (this == obj) return true;
             // equals() should never throw exceptions
@@ -1015,10 +1070,12 @@ abstract class P11Key implements Key, Length {
                 throw new RuntimeException("Could not parse key values", e);
             }
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -1032,10 +1089,12 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public BigInteger getS() {
             fetchValues();
             return s;
         }
+        @Override
         public ECParameterSpec getParams() {
             fetchValues();
             return params;
@@ -1089,10 +1148,12 @@ abstract class P11Key implements Key, Length {
                 throw new RuntimeException("Could not parse key values", e);
             }
         }
+        @Override
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
+        @Override
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -1105,14 +1166,17 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+        @Override
         public ECPoint getW() {
             fetchValues();
             return w;
         }
+        @Override
         public ECParameterSpec getParams() {
             fetchValues();
             return params;
         }
+        @Override
         public String toString() {
             fetchValues();
             return super.toString()

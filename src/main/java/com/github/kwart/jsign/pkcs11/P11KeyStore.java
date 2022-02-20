@@ -185,6 +185,7 @@ final class P11KeyStore extends KeyStoreSpi {
             this.cert = cert;
         }
 
+        @Override
         public String toString() {
             StringBuilder sb = new StringBuilder();
             if (type == ATTR_CLASS_PKEY) {
@@ -230,6 +231,7 @@ final class P11KeyStore extends KeyStoreSpi {
             }
         }
 
+        @Override
         public void handle(Callback[] callbacks)
                 throws IOException, UnsupportedCallbackException {
             if (!(callbacks[0] instanceof PasswordCallback)) {
@@ -239,6 +241,7 @@ final class P11KeyStore extends KeyStoreSpi {
             pc.setPassword(password);  // this clones the password if not null
         }
 
+        @Override
         protected void finalize() throws Throwable {
             if (password != null) {
                 Arrays.fill(password, ' ');
@@ -285,6 +288,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * key cannot be found
      * @exception UnrecoverableKeyException if the key cannot be recovered
      */
+    @Override
     public synchronized Key engineGetKey(String alias, char[] password)
                 throws NoSuchAlgorithmException, UnrecoverableKeyException {
 
@@ -308,7 +312,11 @@ final class P11KeyStore extends KeyStoreSpi {
                                         aliasInfo.id,
                                         null);
                 if (h.type == ATTR_CLASS_PKEY) {
-                    return loadPkey(session, h.handle);
+                    PrivateKey pkey = loadPkey(session, h.handle);
+                    if (pkey instanceof P11Key && password!=null) {
+                        ((P11Key) pkey).qPin = Arrays.copyOf(password, password.length);
+                    }
+                    return pkey;
                 }
             } else {
                 THandle h = getTokenObject(session,
@@ -342,6 +350,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * and the root certificate authority last), or null if the given alias
      * does not exist or does not contain a certificate chain
      */
+    @Override
     public synchronized Certificate[] engineGetCertificateChain(String alias) {
 
         token.ensureValid();
@@ -374,6 +383,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @return the certificate, or null if the given alias does not exist or
      * does not contain a certificate.
      */
+    @Override
     public synchronized Certificate engineGetCertificate(String alias) {
         token.ensureValid();
 
@@ -392,6 +402,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @return the creation date of this entry, or null if the given alias does
      * not exist
      */
+    @Override
     public Date engineGetCreationDate(String alias) {
         token.ensureValid();
         throw new ProviderException(new UnsupportedOperationException());
@@ -419,6 +430,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @exception KeyStoreException if the given key cannot be protected, or
      * this operation fails for some other reason
      */
+    @Override
     public synchronized void engineSetKeyEntry(String alias, Key key,
                                    char[] password,
                                    Certificate[] chain)
@@ -474,6 +486,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @exception KeyStoreException if this operation fails.
      */
+    @Override
     public void engineSetKeyEntry(String alias, byte[] key, Certificate[] chain)
                 throws KeyStoreException {
         token.ensureValid();
@@ -497,6 +510,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * not identify an entry containing a trusted certificate,
      * or this operation fails for some other reason.
      */
+    @Override
     public synchronized void engineSetCertificateEntry
         (String alias, Certificate cert) throws KeyStoreException {
 
@@ -519,6 +533,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @exception KeyStoreException if the entry cannot be removed.
      */
+    @Override
     public synchronized void engineDeleteEntry(String alias)
                 throws KeyStoreException {
         token.ensureValid();
@@ -565,6 +580,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @return enumeration of the alias names
      */
+    @Override
     public synchronized Enumeration<String> engineAliases() {
         token.ensureValid();
 
@@ -581,6 +597,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @return true if the alias exists, false otherwise
      */
+    @Override
     public synchronized boolean engineContainsAlias(String alias) {
         token.ensureValid();
         return aliasMap.containsKey(alias);
@@ -591,6 +608,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @return the number of entries in this keystore
      */
+    @Override
     public synchronized int engineSize() {
         token.ensureValid();
         return aliasMap.size();
@@ -607,6 +625,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @return true if the entry identified by the given alias is a
      * key-related, false otherwise.
      */
+    @Override
     public synchronized boolean engineIsKeyEntry(String alias) {
         token.ensureValid();
 
@@ -628,6 +647,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @return true if the entry identified by the given alias contains a
      * trusted certificate, false otherwise.
      */
+    @Override
     public synchronized boolean engineIsCertificateEntry(String alias) {
         token.ensureValid();
 
@@ -661,6 +681,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @return the alias name of the first entry with matching certificate,
      * or null if no such entry exists in this keystore.
      */
+    @Override
     public synchronized String engineGetCertificateAlias(Certificate cert) {
         token.ensureValid();
         Enumeration<String> e = engineAliases();
@@ -681,6 +702,7 @@ final class P11KeyStore extends KeyStoreSpi {
      * @param stream this must be <code>null</code>
      * @param password this must be <code>null</code>
      */
+    @Override
     public synchronized void engineStore(OutputStream stream, char[] password)
         throws IOException, NoSuchAlgorithmException, CertificateException {
         token.ensureValid();
@@ -703,6 +725,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *          <code>KeyStore.LoadStoreParameter</code>
      *          input is not <code>null</code>
      */
+    @Override
     public synchronized void engineStore(KeyStore.LoadStoreParameter param)
         throws IOException, NoSuchAlgorithmException, CertificateException {
         token.ensureValid();
@@ -725,6 +748,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *          CKF_PROTECTED_AUTHENTICATION_PATH and a non-null
      *          password is given, of if the token login operation failed
      */
+    @Override
     public synchronized void engineLoad(InputStream stream, char[] password)
         throws IOException, NoSuchAlgorithmException, CertificateException {
 
@@ -800,6 +824,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *          CKF_PROTECTED_AUTHENTICATION_PATH and the provided password
      *          is non-null, or if the token login operation fails
      */
+    @Override
     public synchronized void engineLoad(KeyStore.LoadStoreParameter param)
                 throws IOException, NoSuchAlgorithmException,
                 CertificateException {
@@ -892,16 +917,19 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @since 1.5
      */
+    @Override
     public synchronized KeyStore.Entry engineGetEntry(String alias,
                         KeyStore.ProtectionParameter protParam)
                 throws KeyStoreException, NoSuchAlgorithmException,
                 UnrecoverableEntryException {
 
         token.ensureValid();
-
+        char[] password = null;
         if (protParam != null &&
-            protParam instanceof KeyStore.PasswordProtection &&
-            ((KeyStore.PasswordProtection)protParam).getPassword() != null &&
+            protParam instanceof KeyStore.PasswordProtection) {
+            password = ((KeyStore.PasswordProtection)protParam).getPassword();
+        }
+        if (password != null &&
             !token.config.getKeyStoreCompatibilityMode()) {
             throw new KeyStoreException("ProtectionParameter must be null");
         }
@@ -954,6 +982,9 @@ final class P11KeyStore extends KeyStoreSpi {
                         ("expected but could not find private key");
                 } else {
                     PrivateKey pkey = loadPkey(session, h.handle);
+                    if (pkey instanceof P11Key && password != null) {
+                        ((P11Key) pkey).qPin = Arrays.copyOf(password, password.length);
+                    }
                     Certificate[] chain = aliasInfo.chain;
                     if ((pkey != null) && (chain != null)) {
                         return new KeyStore.PrivateKeyEntry(pkey, chain);
@@ -995,6 +1026,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *
      * @since 1.5
      */
+    @Override
     public synchronized void engineSetEntry(String alias, KeyStore.Entry entry,
                         KeyStore.ProtectionParameter protParam)
                 throws KeyStoreException {
@@ -1167,6 +1199,7 @@ final class P11KeyStore extends KeyStoreSpi {
      *          <code>alias</code> is an instance or subclass of the
      *          specified <code>entryClass</code>, false otherwise
      */
+    @Override
     public synchronized boolean engineEntryInstanceOf
                 (String alias, Class<? extends KeyStore.Entry> entryClass) {
         token.ensureValid();

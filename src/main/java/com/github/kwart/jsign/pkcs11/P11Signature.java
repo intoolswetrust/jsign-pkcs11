@@ -603,7 +603,7 @@ final class P11Signature extends SignatureSpi {
     protected byte[] engineSign() throws SignatureException {
         ensureInitialized();
         try {
-            token.provider.contextSpecificLogin(session.id());
+            token.provider.contextSpecificLogin(session.id(), p11Key.qPin);
         } catch (LoginException e) {
             Logger.getLogger(getClass().getName()).log(Level.FINER, "Context specific login failed", e);
         }

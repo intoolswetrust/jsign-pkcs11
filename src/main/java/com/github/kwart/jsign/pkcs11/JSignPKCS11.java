@@ -1325,40 +1325,14 @@ public final class JSignPKCS11 extends AuthProvider {
         // we do not store the PIN in the subject for now
     }
 
-    void contextSpecificLogin(long sessionId) throws LoginException {
-        if (pHandler==null) {
+    void contextSpecificLogin(long sessionId, char[] qpin) throws LoginException {
+        if (qpin == null) {
             if (debug != null) {
-                debug.println("no password callback");
+                debug.println("no QPIN provided");
             }
         }
-        char[] pin = null;
-        java.text.MessageFormat form = new java.text.MessageFormat
-                    (ResourcesMgr.getString
-                    ("PKCS11.Token.providerName.Password."));
-        Object[] source = { getName() };
-
-        PasswordCallback pcall = new PasswordCallback(form.format(source),
-                                                    false);
-        Callback[] callbacks = { pcall };
-        try {
-            pHandler.handle(callbacks);
-        } catch (Exception e) {
-            LoginException le = new LoginException
-                    ("Unable to perform password callback");
-            le.initCause(e);
-            throw le;
-        }
-
-        pin = pcall.getPassword();
-        pcall.clearPassword();
-        if (pin == null) {
-            if (debug != null) {
-                debug.println("caller passed NULL pin");
-            }
-        }
-
+        char[] pin = Arrays.copyOf(qpin, qpin.length);
         // perform token login
-
         try {
             // pin is NULL if using CKF_PROTECTED_AUTHENTICATION_PATH
             p11.C_Login(sessionId, CKU_CONTEXT_SPECIFIC, pin);
@@ -1518,7 +1492,6 @@ public final class JSignPKCS11 extends AuthProvider {
         // get default handler if necessary
 
         if (handler != null) {
-            pHandler = handler;
             return handler;
         }
 
