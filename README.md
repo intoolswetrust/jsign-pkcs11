@@ -17,4 +17,24 @@ This provider implementation calls PKCS11 login function with QPIN before signin
 PKCS11.C_Login(sessionId, CKU_CONTEXT_SPECIFIC, qpin);
 ```
 
+## Usage
+
+If you are Maven user, just add dependency on the latest JSignPKCS11 version
+
+```xml
+<dependency>
+    <groupId>com.github.kwart.jsign</groupId>
+    <artifactId>jsign-pkcs11</artifactId>
+    <version>${jsign.pkcs11.version}</version>
+</dependency>
+```
+
+And replace original SunPKCS11 usages by proper JSignPKCS11 class.
+
+```diff
+- sun.security.pkcs11.SunPKCS11
++ com.github.kwart.jsign.pkcs11.JSignPKCS11
+```
+
+## Warning - NSS not supported
 **The NSS modes from SunPKCS11 provider are not supported!**
