@@ -75,6 +75,8 @@ import sun.security.rsa.RSAKeyFactory;
 
 final class P11KeyStore extends KeyStoreSpi {
 
+    public static final String PROPERTY_KEYLENGTH_OVERRIDE = "jsign-pkcs11.keystore.override.keylength";
+
     private static final CK_ATTRIBUTE ATTR_CLASS_CERT =
                         new CK_ATTRIBUTE(CKA_CLASS, CKO_CERTIFICATE);
     private static final CK_ATTRIBUTE ATTR_CLASS_PKEY =
@@ -1401,6 +1403,8 @@ final class P11KeyStore extends KeyStoreSpi {
                 ECParameterSpec params =
                     ECUtil.getECParameterSpec(null, encodedParams);
                 keyLength = params.getCurve().getField().getFieldSize();
+                // See https://groups.google.com/g/jsignpdf/c/Iv1PBCNAFQI
+                keyLength = Integer.getInteger(PROPERTY_KEYLENGTH_OVERRIDE, keyLength);
             } catch (IOException e) {
                 // we do not want to accept key with unsupported parameters
                 throw new KeyStoreException("Unsupported parameters", e);
