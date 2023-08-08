@@ -17,6 +17,11 @@ This provider implementation calls PKCS11 login function with QPIN before signin
 PKCS11.C_Login(sessionId, CKU_CONTEXT_SPECIFIC, qpin);
 ```
 
+### Other changes
+
+* Class `P11KeyStore` allows overriding the EC `keyLength` (from decoded `CKA_EC_PARAMS` attribute) by specifying
+ the value as a system property named `jsign-pkcs11.keystore.override.keylength`;
+
 ## Usage
 
 If you are Maven user, just add dependency on the latest JSignPKCS11 version
