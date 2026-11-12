@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,10 +34,9 @@ import java.security.spec.*;
 import javax.crypto.*;
 import javax.crypto.spec.*;
 
-import sun.nio.ch.DirectBuffer;
-import sun.security.jca.JCAUtil;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
+import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
 
 /**
  * Cipher implementation class. This class currently supports
@@ -55,17 +54,18 @@ import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
  */
 final class P11Cipher extends CipherSpi {
 
+
     // mode constant for ECB mode
-    private final static int MODE_ECB = 3;
+    private static final int MODE_ECB = 3;
     // mode constant for CBC mode
-    private final static int MODE_CBC = 4;
+    private static final int MODE_CBC = 4;
     // mode constant for CTR mode
-    private final static int MODE_CTR = 5;
+    private static final int MODE_CTR = 5;
 
     // padding constant for NoPadding
-    private final static int PAD_NONE = 5;
+    private static final int PAD_NONE = 5;
     // padding constant for PKCS5Padding
-    private final static int PAD_PKCS5 = 6;
+    private static final int PAD_PKCS5 = 6;
 
     private static interface Padding {
         // ENC: format the specified buffer with padding bytes and return the
@@ -73,9 +73,8 @@ final class P11Cipher extends CipherSpi {
         int setPaddingBytes(byte[] paddingBuffer, int startOff, int padLen);
 
         // DEC: return the length of trailing padding bytes given the specified
-        // padded data
-        int unpad(byte[] paddedData, int len)
-                throws BadPaddingException, IllegalBlockSizeException;
+        // padded data, returns -1 if invalid
+        int unpad(byte[] paddedData, int len) throws IllegalBlockSizeException;
     }
 
     private static class PKCS5Padding implements Padding {
@@ -97,23 +96,32 @@ final class P11Cipher extends CipherSpi {
         }
 
         public int unpad(byte[] paddedData, int len)
-                throws BadPaddingException, IllegalBlockSizeException {
+                throws IllegalBlockSizeException {
             if ((len < 1) || (len % blockSize != 0)) {
                 throw new IllegalBlockSizeException
                     ("Input length must be multiples of " + blockSize);
             }
-            byte padValue = paddedData[len - 1];
-            if (padValue < 1 || padValue > blockSize) {
-                throw new BadPaddingException("Invalid pad value!");
+
+            int padValue = paddedData[len - 1] & 0x0ff;
+            // check padValue >= 1; negative if fail
+            int invalid = (padValue - 1);
+            // check padValue <= blockSize; negative if fail
+            invalid |= (blockSize - padValue);
+
+            // check the last block for the padding bytes
+            for (int i = len - blockSize; i < len; i++) {
+                // mask = 0 for the first (blockSize - padValue) bytes in the
+                // block. Otherwise, use 0xffff to preserve the value
+                int mask = (len - padValue - i - 1) >> 8 ;
+                int valueCheck = ((paddedData[i] & 0x0ff) ^ padValue) & mask;
+                // again, assign negative value if fail
+                invalid |= -valueCheck;
             }
-            // sanity check padding bytes
-            int padStartIndex = len - padValue;
-            for (int i = padStartIndex; i < len; i++) {
-                if (paddedData[i] != padValue) {
-                    throw new BadPaddingException("Invalid pad bytes!");
-                }
-            }
-            return padValue;
+            // convert 'invalid' to -1 when 'invalid' is not 0
+            // right shifting by 8 should be sufficient since value range is
+            // small
+            invalid >>= 8; // 0 or -1
+            return (invalid | padValue);
         }
     }
 
@@ -138,7 +146,7 @@ final class P11Cipher extends CipherSpi {
     // flag indicating whether an operation is initialized
     private boolean initialized;
 
-    // falg indicating encrypt or decrypt mode
+    // flag indicating encrypt or decrypt mode
     private boolean encrypt;
 
     // mode, one of MODE_* above (MODE_ECB for stream ciphers)
@@ -184,7 +192,7 @@ final class P11Cipher extends CipherSpi {
         this.algorithm = algorithm;
         this.mechanism = mechanism;
 
-        String algoParts[] = algorithm.split("/");
+        String[] algoParts = algorithm.split("/");
 
         if (algoParts[0].startsWith("AES")) {
             blockSize = 16;
@@ -224,21 +232,18 @@ final class P11Cipher extends CipherSpi {
 
     private int parseMode(String mode) throws NoSuchAlgorithmException {
         mode = mode.toUpperCase(Locale.ENGLISH);
-        int result;
-        if (mode.equals("ECB")) {
-            result = MODE_ECB;
-        } else if (mode.equals("CBC")) {
-            if (blockSize == 0) {
-                throw new NoSuchAlgorithmException
-                        ("CBC mode not supported with stream ciphers");
+        return switch (mode) {
+            case "ECB" -> MODE_ECB;
+            case "CBC" -> {
+                if (blockSize == 0) {
+                    throw new NoSuchAlgorithmException
+                            ("CBC mode not supported with stream ciphers");
+                }
+                yield MODE_CBC;
             }
-            result = MODE_CBC;
-        } else if (mode.equals("CTR")) {
-            result = MODE_CTR;
-        } else {
-            throw new NoSuchAlgorithmException("Unsupported mode " + mode);
-        }
-        return result;
+            case "CTR" -> MODE_CTR;
+            default -> throw new NoSuchAlgorithmException("Unsupported mode " + mode);
+        };
     }
 
     // see JCE spec
@@ -260,10 +265,8 @@ final class P11Cipher extends CipherSpi {
                 // no native padding support; use our own padding impl
                 paddingObj = new PKCS5Padding(blockSize);
                 padBuffer = new byte[blockSize];
-                char[] tokenLabel = token.tokenInfo.label;
                 // NSS requires block-sized updates in multi-part operations.
-                reqBlockUpdates = ((tokenLabel[0] == 'N' && tokenLabel[1] == 'S'
-                        && tokenLabel[2] == 'S') ? true : false);
+                reqBlockUpdates = P11Util.isNSS(token);
             }
         } else {
             throw new NoSuchPaddingException("Unsupported padding " + padding);
@@ -320,7 +323,7 @@ final class P11Cipher extends CipherSpi {
             throws InvalidKeyException, InvalidAlgorithmParameterException {
         byte[] ivValue;
         if (params != null) {
-            if (params instanceof IvParameterSpec == false) {
+            if (!(params instanceof IvParameterSpec)) {
                 throw new InvalidAlgorithmParameterException
                         ("Only IvParameterSpec supported");
             }
@@ -362,17 +365,15 @@ final class P11Cipher extends CipherSpi {
                             key.getEncoded().length) != fixedKeySize) {
             throw new InvalidKeyException("Key size is invalid");
         }
-        switch (opmode) {
-            case Cipher.ENCRYPT_MODE:
-                encrypt = true;
-                break;
-            case Cipher.DECRYPT_MODE:
-                encrypt = false;
-                break;
-            default:
-                throw new InvalidAlgorithmParameterException
-                        ("Unsupported mode: " + opmode);
-        }
+        encrypt = switch (opmode) {
+            case Cipher.ENCRYPT_MODE -> true;
+            case Cipher.DECRYPT_MODE -> false;
+            case Cipher.WRAP_MODE, Cipher.UNWRAP_MODE -> throw new UnsupportedOperationException
+                    ("Unsupported mode: " + opmode);
+            default ->
+                // should never happen; checked by Cipher.init()
+                    throw new AssertionError("Unknown mode: " + opmode);
+        };
         if (blockMode == MODE_ECB) { // ECB or stream cipher
             if (iv != null) {
                 if (blockSize == 0) {
@@ -385,7 +386,7 @@ final class P11Cipher extends CipherSpi {
             }
         } else { // MODE_CBC or MODE_CTR
             if (iv == null) {
-                if (encrypt == false) {
+                if (!encrypt) {
                     String exMsg =
                         (blockMode == MODE_CBC ?
                          "IV must be specified for decryption in CBC mode" :
@@ -394,7 +395,7 @@ final class P11Cipher extends CipherSpi {
                 }
                 // generate random IV
                 if (random == null) {
-                    random = JCAUtil.getSecureRandom();
+                    random = P11Util.getSecureRandom();
                 }
                 iv = new byte[blockSize];
                 random.nextBytes(iv);
@@ -440,8 +441,14 @@ final class P11Cipher extends CipherSpi {
 
     private void cancelOperation() {
         token.ensureValid();
-        // cancel operation by finishing it; avoid killSession as some
-        // hardware vendors may require re-login
+
+        if (P11Util.trySessionCancel(token, session,
+                (encrypt ? CKF_ENCRYPT : CKF_DECRYPT))) {
+            return;
+        }
+
+        // cancel by finishing operations; avoid killSession as
+        // some hardware vendors may require re-login
         try {
             int bufLen = doFinalLength(0);
             byte[] buffer = new byte[bufLen];
@@ -451,9 +458,9 @@ final class P11Cipher extends CipherSpi {
                 token.p11.C_DecryptFinal(session.id(), 0, buffer, 0, bufLen);
             }
         } catch (PKCS11Exception e) {
-            if (e.getErrorCode() == CKR_OPERATION_NOT_INITIALIZED) {
+            if (e.match(CKR_OPERATION_NOT_INITIALIZED)) {
                 // Cancel Operation may be invoked after an error on a PKCS#11
-                // call. If the operation inside the token was already cancelled,
+                // call. If the operation inside the token is already cancelled,
                 // do not fail here. This is part of a defensive mechanism for
                 // PKCS#11 libraries that do not strictly follow the standard.
                 return;
@@ -483,7 +490,7 @@ final class P11Cipher extends CipherSpi {
             if (session == null) {
                 session = token.getOpSession();
             }
-            CK_MECHANISM mechParams = (blockMode == MODE_CTR?
+            CK_MECHANISM mechParams = (blockMode == MODE_CTR ?
                     new CK_MECHANISM(mechanism, new CK_AES_CTR_PARAMS(iv)) :
                     new CK_MECHANISM(mechanism, iv));
             if (encrypt) {
@@ -552,6 +559,10 @@ final class P11Cipher extends CipherSpi {
     @Override
     protected int engineUpdate(ByteBuffer inBuffer, ByteBuffer outBuffer)
             throws ShortBufferException {
+        // direct buffer addresses need JDK internals, the default implementation copies
+        if (!inBuffer.hasArray() || !outBuffer.hasArray()) {
+            return super.engineUpdate(inBuffer, outBuffer);
+        }
         return implUpdate(inBuffer, outBuffer);
     }
 
@@ -586,6 +597,10 @@ final class P11Cipher extends CipherSpi {
     protected int engineDoFinal(ByteBuffer inBuffer, ByteBuffer outBuffer)
             throws ShortBufferException, IllegalBlockSizeException,
             BadPaddingException {
+        // direct buffer addresses need JDK internals, the default implementation copies
+        if (!inBuffer.hasArray() || !outBuffer.hasArray()) {
+            return super.engineDoFinal(inBuffer, outBuffer);
+        }
         int n = engineUpdate(inBuffer, outBuffer);
         n += implDoFinal(outBuffer);
         return n;
@@ -651,7 +666,7 @@ final class P11Cipher extends CipherSpi {
             bytesBuffered += (inLen - k);
             return k;
         } catch (PKCS11Exception e) {
-            if (e.getErrorCode() == CKR_BUFFER_TOO_SMALL) {
+            if (e.match(CKR_BUFFER_TOO_SMALL)) {
                 throw (ShortBufferException)
                         (new ShortBufferException().initCause(e));
             }
@@ -683,10 +698,7 @@ final class P11Cipher extends CipherSpi {
             int inOfs = 0;
             byte[] inArray = null;
 
-            if (inBuffer instanceof DirectBuffer) {
-                inAddr = ((DirectBuffer) inBuffer).address();
-                inOfs = origPos;
-            } else if (inBuffer.hasArray()) {
+            if (inBuffer.hasArray()) {
                 inArray = inBuffer.array();
                 inOfs = (origPos + inBuffer.arrayOffset());
             }
@@ -694,21 +706,16 @@ final class P11Cipher extends CipherSpi {
             long outAddr = 0;
             int outOfs = 0;
             byte[] outArray = null;
-            if (outBuffer instanceof DirectBuffer) {
-                outAddr = ((DirectBuffer) outBuffer).address();
-                outOfs = outBuffer.position();
+            if (outBuffer.hasArray()) {
+                outArray = outBuffer.array();
+                outOfs = (outBuffer.position() + outBuffer.arrayOffset());
             } else {
-                if (outBuffer.hasArray()) {
-                    outArray = outBuffer.array();
-                    outOfs = (outBuffer.position() + outBuffer.arrayOffset());
-                } else {
-                    outArray = new byte[outLen];
-                }
+                outArray = new byte[outLen];
             }
 
             int k = 0;
             int newPadBufferLen = 0;
-            if (paddingObj != null  && (!encrypt || reqBlockUpdates)) {
+            if (paddingObj != null && (!encrypt || reqBlockUpdates)) {
                 if (padBufferLen != 0) {
                     if (padBufferLen != padBuffer.length) {
                         int bufCapacity = padBuffer.length - padBufferLen;
@@ -765,8 +772,7 @@ final class P11Cipher extends CipherSpi {
                 bufferInputBytes(inBuffer, newPadBufferLen);
             }
             bytesBuffered += (inLen - k);
-            if (!(outBuffer instanceof DirectBuffer) &&
-                    !outBuffer.hasArray()) {
+            if (!outBuffer.hasArray()) {
                 outBuffer.put(outArray, outOfs, k);
             } else {
                 outBuffer.position(outBuffer.position() + k);
@@ -775,7 +781,7 @@ final class P11Cipher extends CipherSpi {
         } catch (PKCS11Exception e) {
             // Reset input buffer to its original position for
             inBuffer.position(origPos);
-            if (e.getErrorCode() == CKR_BUFFER_TOO_SMALL) {
+            if (e.match(CKR_BUFFER_TOO_SMALL)) {
                 throw (ShortBufferException)
                         (new ShortBufferException().initCause(e));
             }
@@ -803,13 +809,21 @@ final class P11Cipher extends CipherSpi {
                 if (paddingObj != null) {
                     int startOff = 0;
                     if (reqBlockUpdates) {
-                        startOff = padBufferLen;
+                        // call C_EncryptUpdate first if the padBuffer is full
+                        // to make room for padding bytes
+                        if (padBufferLen == padBuffer.length) {
+                            k = token.p11.C_EncryptUpdate(session.id(),
+                                0, padBuffer, 0, padBufferLen,
+                                0, out, outOfs, outLen);
+                        } else {
+                            startOff = padBufferLen;
+                        }
                     }
                     int actualPadLen = paddingObj.setPaddingBytes(padBuffer,
                             startOff, requiredOutLen - bytesBuffered);
-                    k = token.p11.C_EncryptUpdate(session.id(),
+                    k += token.p11.C_EncryptUpdate(session.id(),
                             0, padBuffer, 0, startOff + actualPadLen,
-                            0, out, outOfs, outLen);
+                            0, out, outOfs + k, outLen - k);
                 }
                 // Some implementations such as the NSS Software Token do not
                 // cancel the operation upon a C_EncryptUpdate failure (as
@@ -840,6 +854,9 @@ final class P11Cipher extends CipherSpi {
                             padBuffer.length - k);
 
                     int actualPadLen = paddingObj.unpad(padBuffer, k);
+                    if (actualPadLen < 0) {
+                        throw new BadPaddingException("Invalid pad value!");
+                    }
                     k -= actualPadLen;
                     System.arraycopy(padBuffer, 0, out, outOfs, k);
                 } else {
@@ -873,16 +890,11 @@ final class P11Cipher extends CipherSpi {
             long outAddr = 0;
             byte[] outArray = null;
             int outOfs = 0;
-            if (outBuffer instanceof DirectBuffer) {
-                outAddr = ((DirectBuffer) outBuffer).address();
-                outOfs = outBuffer.position();
+            if (outBuffer.hasArray()) {
+                outArray = outBuffer.array();
+                outOfs = outBuffer.position() + outBuffer.arrayOffset();
             } else {
-                if (outBuffer.hasArray()) {
-                    outArray = outBuffer.array();
-                    outOfs = outBuffer.position() + outBuffer.arrayOffset();
-                } else {
-                    outArray = new byte[outLen];
-                }
+                outArray = new byte[outLen];
             }
 
             int k = 0;
@@ -891,13 +903,21 @@ final class P11Cipher extends CipherSpi {
                 if (paddingObj != null) {
                     int startOff = 0;
                     if (reqBlockUpdates) {
-                        startOff = padBufferLen;
+                        // call C_EncryptUpdate first if the padBuffer is full
+                        // to make room for padding bytes
+                        if (padBufferLen == padBuffer.length) {
+                            k = token.p11.C_EncryptUpdate(session.id(),
+                                    0, padBuffer, 0, padBufferLen,
+                                    outAddr, outArray, outOfs, outLen);
+                        } else {
+                            startOff = padBufferLen;
+                        }
                     }
                     int actualPadLen = paddingObj.setPaddingBytes(padBuffer,
                             startOff, requiredOutLen - bytesBuffered);
-                    k = token.p11.C_EncryptUpdate(session.id(),
+                    k += token.p11.C_EncryptUpdate(session.id(),
                             0, padBuffer, 0, startOff + actualPadLen,
-                            outAddr, outArray, outOfs, outLen);
+                            outAddr, outArray, outOfs + k, outLen - k);
                 }
                 // Some implementations such as the NSS Software Token do not
                 // cancel the operation upon a C_EncryptUpdate failure (as
@@ -930,6 +950,9 @@ final class P11Cipher extends CipherSpi {
                             0, padBuffer, k, padBuffer.length - k);
 
                     int actualPadLen = paddingObj.unpad(padBuffer, k);
+                    if (actualPadLen < 0) {
+                        throw new BadPaddingException("Invalid pad value!");
+                    }
                     k -= actualPadLen;
                     outArray = padBuffer;
                     outOfs = 0;
@@ -940,8 +963,7 @@ final class P11Cipher extends CipherSpi {
                 }
             }
             if ((!encrypt && paddingObj != null) ||
-                    (!(outBuffer instanceof DirectBuffer) &&
-                    !outBuffer.hasArray())) {
+                    (!outBuffer.hasArray())) {
                 outBuffer.put(outArray, outOfs, k);
             } else {
                 outBuffer.position(outBuffer.position() + k);
@@ -957,12 +979,11 @@ final class P11Cipher extends CipherSpi {
 
     private void handleException(PKCS11Exception e)
             throws ShortBufferException, IllegalBlockSizeException {
-        long errorCode = e.getErrorCode();
-        if (errorCode == CKR_BUFFER_TOO_SMALL) {
+        if (e.match(CKR_BUFFER_TOO_SMALL)) {
             throw (ShortBufferException)
                     (new ShortBufferException().initCause(e));
-        } else if (errorCode == CKR_DATA_LEN_RANGE ||
-                   errorCode == CKR_ENCRYPTED_DATA_LEN_RANGE) {
+        } else if (e.match(CKR_DATA_LEN_RANGE) ||
+                e.match(CKR_ENCRYPTED_DATA_LEN_RANGE)) {
             throw (IllegalBlockSizeException)
                     (new IllegalBlockSizeException(e.toString()).initCause(e));
         }

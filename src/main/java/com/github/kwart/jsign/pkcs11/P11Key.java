@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,22 +36,12 @@ import java.security.spec.*;
 import javax.crypto.*;
 import javax.crypto.interfaces.*;
 import javax.crypto.spec.*;
-import javax.security.auth.callback.CallbackHandler;
 
-import sun.security.rsa.RSAUtil.KeyType;
-import sun.security.rsa.RSAPublicKeyImpl;
-import sun.security.rsa.RSAPrivateCrtKeyImpl;
-
-import sun.security.internal.interfaces.TlsMasterSecret;
 import sun.security.pkcs11.wrapper.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.O_GENERATE;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
-import sun.security.util.DerValue;
-import sun.security.util.Length;
-
-import sun.security.jca.JCAUtil;
 
 /**
  * Key implementation classes.
@@ -67,13 +57,14 @@ import sun.security.jca.JCAUtil;
  * @author  Andreas Sterbenz
  * @since   1.5
  */
-abstract class P11Key implements Key, Length {
+abstract class P11Key implements Key {
 
+    @Serial
     private static final long serialVersionUID = -2575874101938349339L;
 
-    private final static String PUBLIC = "public";
-    private final static String PRIVATE = "private";
-    private final static String SECRET = "secret";
+    private static final String PUBLIC = "public";
+    private static final String PRIVATE = "private";
+    private static final String SECRET = "secret";
 
     // type of key, one of (PUBLIC, PRIVATE, SECRET)
     final String type;
@@ -90,14 +81,22 @@ abstract class P11Key implements Key, Length {
     // flags indicating whether the key is a token object, sensitive, extractable
     final boolean tokenObject, sensitive, extractable;
 
-    volatile char[] qPin;
+    // flag indicating whether the current token is NSS
+    final transient boolean isNSS;
 
+    @SuppressWarnings("serial") // Type of field is not Serializable
     private final NativeKeyHolder keyIDHolder;
+
+    // key password (QPIN) for the CKU_CONTEXT_SPECIFIC login, set by P11KeyStore
+    private transient volatile char[] contextPin;
+
+    // CKA_ALWAYS_AUTHENTICATE value, null until read from the token
+    private transient volatile Boolean alwaysAuthenticate;
 
     private static final boolean DISABLE_NATIVE_KEYS_EXTRACTION;
 
     /**
-     * {@systemProperty sun.security.pkcs11.disableKeyExtraction} property
+     * {@systemProperty com.github.kwart.jsign.pkcs11.disableKeyExtraction} property
      * indicating whether or not cryptographic keys within tokens are
      * extracted to a Java byte array for memory management purposes.
      *
@@ -107,7 +106,8 @@ abstract class P11Key implements Key, Length {
     static {
         PrivilegedAction<String> getKeyExtractionProp =
                 () -> System.getProperty(
-                        "sun.security.pkcs11.disableKeyExtraction", "false");
+                        "com.github.kwart.jsign.pkcs11.disableKeyExtraction", "false");
+        @SuppressWarnings("removal")
         String disableKeyExtraction =
                 AccessController.doPrivileged(getKeyExtractionProp);
         DISABLE_NATIVE_KEYS_EXTRACTION =
@@ -115,7 +115,7 @@ abstract class P11Key implements Key, Length {
     }
 
     P11Key(String type, Session session, long keyID, String algorithm,
-            int keyLength, CK_ATTRIBUTE[] attributes) {
+            int keyLength, CK_ATTRIBUTE[] attrs) {
         this.type = type;
         this.token = session.token;
         this.algorithm = algorithm;
@@ -123,31 +123,69 @@ abstract class P11Key implements Key, Length {
         boolean tokenObject = false;
         boolean sensitive = false;
         boolean extractable = true;
-        int n = (attributes == null) ? 0 : attributes.length;
-        for (int i = 0; i < n; i++) {
-            CK_ATTRIBUTE attr = attributes[i];
-            if (attr.type == CKA_TOKEN) {
-                tokenObject = attr.getBoolean();
-            } else if (attr.type == CKA_SENSITIVE) {
-                sensitive = attr.getBoolean();
-            } else if (attr.type == CKA_EXTRACTABLE) {
-                extractable = attr.getBoolean();
+        if (attrs != null) {
+            for (CK_ATTRIBUTE attr : attrs) {
+                if (attr.type == CKA_TOKEN) {
+                    tokenObject = attr.getBoolean();
+                } else if (attr.type == CKA_SENSITIVE) {
+                    sensitive = attr.getBoolean();
+                } else if (attr.type == CKA_EXTRACTABLE) {
+                    extractable = attr.getBoolean();
+                }
             }
         }
         this.tokenObject = tokenObject;
         this.sensitive = sensitive;
         this.extractable = extractable;
-        char[] tokenLabel = this.token.tokenInfo.label;
-        boolean isNSS = (tokenLabel[0] == 'N' && tokenLabel[1] == 'S'
-                && tokenLabel[2] == 'S');
+        isNSS = P11Util.isNSS(this.token);
         boolean extractKeyInfo = (!DISABLE_NATIVE_KEYS_EXTRACTION && isNSS &&
                 extractable && !tokenObject);
-        this.keyIDHolder = new NativeKeyHolder(this, keyID, session, extractKeyInfo,
-            tokenObject);
+        this.keyIDHolder = new NativeKeyHolder(this, keyID, session,
+                extractKeyInfo, tokenObject);
     }
 
     public long getKeyID() {
         return keyIDHolder.getKeyID();
+    }
+
+    void setContextPin(char[] pin) {
+        contextPin = pin.clone();
+    }
+
+    /**
+     * Returns a copy of the key password (QPIN), or null if none was given.
+     */
+    char[] getContextPin() {
+        char[] pin = contextPin;
+        return pin == null ? null : pin.clone();
+    }
+
+    /**
+     * Returns the CKA_ALWAYS_AUTHENTICATE attribute of a private key. Tokens
+     * which don't know the attribute (pre PKCS#11 v2.20) don't require the
+     * context specific login, so read failures count as false.
+     */
+    boolean isAlwaysAuthenticate(Session session, long keyID) {
+        Boolean value = alwaysAuthenticate;
+        if (value == null) {
+            value = Boolean.FALSE;
+            if (PRIVATE.equals(type)) {
+                CK_ATTRIBUTE[] attrs = { new CK_ATTRIBUTE(CKA_ALWAYS_AUTHENTICATE) };
+                try {
+                    token.p11.C_GetAttributeValue(session.id(), keyID, attrs);
+                    // the JDK wrapper returns booleans it doesn't know as CK_BBOOL bytes
+                    Object v = attrs[0].pValue;
+                    value = (v instanceof Boolean b && b)
+                            || (v instanceof byte[] bytes && bytes.length > 0 && bytes[0] != 0);
+                } catch (PKCS11Exception | RuntimeException e) {
+                    if (JSignPKCS11.debug != null) {
+                        JSignPKCS11.debug.println("Unable to read CKA_ALWAYS_AUTHENTICATE: " + e);
+                    }
+                }
+            }
+            alwaysAuthenticate = value;
+        }
+        return value;
     }
 
     public void releaseKeyID() {
@@ -155,31 +193,40 @@ abstract class P11Key implements Key, Length {
     }
 
     // see JCA spec
-    @Override
     public final String getAlgorithm() {
         token.ensureValid();
         return algorithm;
     }
 
     // see JCA spec
-    @Override
     public final byte[] getEncoded() {
         byte[] b = getEncodedInternal();
         return (b == null) ? null : b.clone();
     }
 
+    // Called by the NativeResourceCleaner at specified intervals
+    // See NativeResourceCleaner for more information
+    static boolean drainRefQueue() {
+        boolean found = false;
+        SessionKeyRef next;
+        while ((next = (SessionKeyRef) SessionKeyRef.refQueue.poll()) != null) {
+            found = true;
+            next.dispose();
+        }
+        return found;
+    }
+
     abstract byte[] getEncodedInternal();
 
-    @Override
     public boolean equals(Object obj) {
         if (this == obj) {
             return true;
         }
         // equals() should never throw exceptions
-        if (token.isValid() == false) {
+        if (!token.isValid()) {
             return false;
         }
-        if (obj instanceof Key == false) {
+        if (!(obj instanceof Key other)) {
             return false;
         }
         String thisFormat = getFormat();
@@ -188,8 +235,7 @@ abstract class P11Key implements Key, Length {
             // XXX getEncoded() for unextractable keys will change that
             return false;
         }
-        Key other = (Key)obj;
-        if (thisFormat.equals(other.getFormat()) == false) {
+        if (!thisFormat.equals(other.getFormat())) {
             return false;
         }
         byte[] thisEnc = this.getEncodedInternal();
@@ -202,10 +248,9 @@ abstract class P11Key implements Key, Length {
         return MessageDigest.isEqual(thisEnc, otherEnc);
     }
 
-    @Override
     public int hashCode() {
         // hashCode() should never throw exceptions
-        if (token.isValid() == false) {
+        if (!token.isValid()) {
             return 0;
         }
         byte[] b1 = getEncodedInternal();
@@ -231,16 +276,29 @@ abstract class P11Key implements Key, Length {
         } else {
             // XXX short term serialization for unextractable keys
             throw new NotSerializableException
-                ("Cannot serialize sensitive and unextractable keys");
+                    ("Cannot serialize sensitive, unextractable " + (isNSS ?
+                    ", and NSS token keys" : "keys"));
         }
-        return new KeyRep(type, getAlgorithm(), format, getEncoded());
+        return new KeyRep(type, getAlgorithm(), format, getEncodedInternal());
     }
 
-    @Override
+    /**
+     * Restores the state of this object from the stream.
+     *
+     * @param  stream the {@code ObjectInputStream} from which data is read
+     * @throws IOException if an I/O error occurs
+     * @throws ClassNotFoundException if a serialized class cannot be loaded
+     */
+    @java.io.Serial
+    private void readObject(ObjectInputStream stream)
+            throws IOException, ClassNotFoundException {
+        throw new InvalidObjectException("P11Key not directly deserializable");
+    }
+
     public String toString() {
         token.ensureValid();
         String s1 = token.provider.getName() + " " + algorithm + " " + type
-                + " key, " + keyLength + " bits";
+                + " key, " + keyLength + " bits ";
         s1 += (tokenObject ? "token" : "session") + " object";
         if (isPublic()) {
             s1 += ")";
@@ -254,7 +312,6 @@ abstract class P11Key implements Key, Length {
     /**
      * Return bit length of the key.
      */
-    @Override
     public int length() {
         return keyLength;
     }
@@ -271,22 +328,34 @@ abstract class P11Key implements Key, Length {
         return type == SECRET;
     }
 
-    void fetchAttributes(CK_ATTRIBUTE[] attributes) {
+    CK_ATTRIBUTE[] fetchAttributes(CK_ATTRIBUTE[] attrs) {
+        Objects.requireNonNull(attrs, "attrs must be non-null");
         Session tempSession = null;
         long keyID = this.getKeyID();
         try {
             tempSession = token.getOpSession();
             token.p11.C_GetAttributeValue(tempSession.id(), keyID,
-                        attributes);
+                    attrs);
         } catch (PKCS11Exception e) {
             throw new ProviderException(e);
         } finally {
             this.releaseKeyID();
             token.releaseSession(tempSession);
         }
+        return attrs;
     }
 
-    private final static CK_ATTRIBUTE[] A0 = new CK_ATTRIBUTE[0];
+    // convenience method which returns the attribute values as BigInteger[]
+    BigInteger[] fetchAttributesAsInts(CK_ATTRIBUTE[] attrs) {
+        attrs = fetchAttributes(attrs);
+        BigInteger[] res = new BigInteger[attrs.length];
+        for (int i = 0; i < attrs.length; i++) {
+            res[i] = attrs[i].getBigInteger();
+        }
+        return res;
+    }
+
+    private static final CK_ATTRIBUTE[] A0 = new CK_ATTRIBUTE[0];
 
     private static CK_ATTRIBUTE[] getAttributes(Session session, long keyID,
             CK_ATTRIBUTE[] knownAttributes, CK_ATTRIBUTE[] desiredAttributes) {
@@ -322,118 +391,87 @@ abstract class P11Key implements Key, Length {
     }
 
     static SecretKey secretKey(Session session, long keyID, String algorithm,
-            int keyLength, CK_ATTRIBUTE[] attributes) {
-        attributes = getAttributes(session, keyID, attributes, new CK_ATTRIBUTE[] {
-            new CK_ATTRIBUTE(CKA_TOKEN),
-            new CK_ATTRIBUTE(CKA_SENSITIVE),
-            new CK_ATTRIBUTE(CKA_EXTRACTABLE),
+            int keyLength, CK_ATTRIBUTE[] attrs) {
+        attrs = getAttributes(session, keyID, attrs, new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_TOKEN),
+                    new CK_ATTRIBUTE(CKA_SENSITIVE),
+                    new CK_ATTRIBUTE(CKA_EXTRACTABLE),
         });
-        return new P11SecretKey(session, keyID, algorithm, keyLength,
-                attributes);
+        return new P11SecretKey(session, keyID, algorithm, keyLength, attrs);
     }
 
-    static SecretKey masterSecretKey(Session session, long keyID, String algorithm,
-            int keyLength, CK_ATTRIBUTE[] attributes, int major, int minor) {
-        attributes = getAttributes(session, keyID, attributes, new CK_ATTRIBUTE[] {
+    static SecretKey pbeKey(Session session, long keyID, String algorithm,
+            int keyLength, CK_ATTRIBUTE[] attrs, char[] password, byte[] salt,
+            int iterationCount) {
+        attrs = getAttributes(session, keyID, attrs, new CK_ATTRIBUTE[] {
             new CK_ATTRIBUTE(CKA_TOKEN),
             new CK_ATTRIBUTE(CKA_SENSITIVE),
             new CK_ATTRIBUTE(CKA_EXTRACTABLE),
         });
-        return new P11TlsMasterSecretKey(
-                session, keyID, algorithm, keyLength, attributes, major,
-                minor);
+        return new P11PBEKey(session, keyID, algorithm, keyLength,
+                attrs, password, salt, iterationCount);
     }
 
     // we assume that all components of public keys are always accessible
     static PublicKey publicKey(Session session, long keyID, String algorithm,
-            int keyLength, CK_ATTRIBUTE[] attributes) {
-        switch (algorithm) {
-            case "RSA":
-                return new P11RSAPublicKey(session, keyID, algorithm,
-                        keyLength, attributes);
-            case "DSA":
-                return new P11DSAPublicKey(session, keyID, algorithm,
-                        keyLength, attributes);
-            case "DH":
-                return new P11DHPublicKey(session, keyID, algorithm,
-                        keyLength, attributes);
-            case "EC":
-                return new P11ECPublicKey(session, keyID, algorithm,
-                        keyLength, attributes);
-            default:
-                throw new ProviderException
+            int keyLength, CK_ATTRIBUTE[] attrs) {
+        return switch (algorithm) {
+            case "RSA" -> new P11RSAPublicKey(session, keyID, algorithm,
+                    keyLength, attrs);
+            case "DSA" -> new P11DSAPublicKey(session, keyID, algorithm,
+                    keyLength, attrs);
+            case "DH" -> new P11DHPublicKey(session, keyID, algorithm,
+                    keyLength, attrs);
+            case "EC" -> new P11ECPublicKey(session, keyID, algorithm,
+                    keyLength, attrs);
+            default -> throw new ProviderException
                     ("Unknown public key algorithm " + algorithm);
-        }
+        };
     }
 
     static PrivateKey privateKey(Session session, long keyID, String algorithm,
-            int keyLength, CK_ATTRIBUTE[] attributes) {
-        attributes = getAttributes(session, keyID, attributes, new CK_ATTRIBUTE[] {
-            new CK_ATTRIBUTE(CKA_TOKEN),
-            new CK_ATTRIBUTE(CKA_SENSITIVE),
-            new CK_ATTRIBUTE(CKA_EXTRACTABLE),
+            int keyLength, CK_ATTRIBUTE[] attrs) {
+        attrs = getAttributes(session, keyID, attrs, new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_TOKEN),
+                    new CK_ATTRIBUTE(CKA_SENSITIVE),
+                    new CK_ATTRIBUTE(CKA_EXTRACTABLE),
         });
-        if (attributes[1].getBoolean() || (attributes[2].getBoolean() == false)) {
-            return new P11PrivateKey
-                (session, keyID, algorithm, keyLength, attributes);
-        } else {
-            switch (algorithm) {
-                case "RSA":
-                    // XXX better test for RSA CRT keys (single getAttributes() call)
-                    // we need to determine whether this is a CRT key
-                    // see if we can obtain the public exponent
-                    // this should also be readable for sensitive/extractable keys
-                    CK_ATTRIBUTE[] attrs2 = new CK_ATTRIBUTE[] {
-                        new CK_ATTRIBUTE(CKA_PUBLIC_EXPONENT),
-                    };
-                    boolean crtKey;
-                    try {
-                        session.token.p11.C_GetAttributeValue
-                            (session.id(), keyID, attrs2);
-                        crtKey = (attrs2[0].pValue instanceof byte[]);
-                    } catch (PKCS11Exception e) {
-                        // ignore, assume not available
-                        crtKey = false;
-                    }
-                    if (crtKey) {
-                        return new P11RSAPrivateKey(session, keyID, algorithm,
-                                keyLength, attributes);
-                    } else {
-                        return new P11RSAPrivateNonCRTKey(session, keyID,
-                                algorithm, keyLength, attributes);
-                    }
-                case "DSA":
-                    return new P11DSAPrivateKey(session, keyID, algorithm,
-                            keyLength, attributes);
-                case "DH":
-                    return new P11DHPrivateKey(session, keyID, algorithm,
-                            keyLength, attributes);
-                case "EC":
-                    return new P11ECPrivateKey(session, keyID, algorithm,
-                            keyLength, attributes);
-                default:
-                    throw new ProviderException
-                            ("Unknown private key algorithm " + algorithm);
-            }
-        }
+
+        boolean keySensitive =
+                (attrs[0].getBoolean() && P11Util.isNSS(session.token)) ||
+                attrs[1].getBoolean() || !attrs[2].getBoolean();
+
+        return switch (algorithm) {
+            case "RSA" -> P11RSAPrivateKeyInternal.of(session, keyID, algorithm,
+                    keyLength, attrs, keySensitive);
+            case "DSA" -> P11DSAPrivateKeyInternal.of(session, keyID, algorithm,
+                    keyLength, attrs, keySensitive);
+            case "DH" -> P11DHPrivateKeyInternal.of(session, keyID, algorithm,
+                    keyLength, attrs, keySensitive);
+            case "EC" -> P11ECPrivateKeyInternal.of(session, keyID, algorithm,
+                    keyLength, attrs, keySensitive);
+            default -> throw new ProviderException
+                    ("Unknown private key algorithm " + algorithm);
+        };
     }
 
-    // class for sensitive and unextractable private keys
-    private static final class P11PrivateKey extends P11Key
-                                                implements PrivateKey {
+    // base class for all PKCS11 private keys
+    private static abstract class P11PrivateKey extends P11Key implements
+            PrivateKey {
+        @Serial
         private static final long serialVersionUID = -2138581185214187615L;
 
+        protected byte[] encoded; // guard by synchronized
+
         P11PrivateKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(PRIVATE, session, keyID, algorithm, keyLength, attrs);
         }
         // XXX temporary encoding for serialization purposes
-        @Override
         public String getFormat() {
             token.ensureValid();
             return null;
         }
-        @Override
         byte[] getEncodedInternal() {
             token.ensureValid();
             return null;
@@ -441,48 +479,39 @@ abstract class P11Key implements Key, Length {
     }
 
     private static class P11SecretKey extends P11Key implements SecretKey {
+        @Serial
         private static final long serialVersionUID = -7828241727014329084L;
-        private volatile byte[] encoded;
+
+        private volatile byte[] encoded; // guard by double-checked locking
+
         P11SecretKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(SECRET, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(SECRET, session, keyID, algorithm, keyLength, attrs);
         }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
-            if (sensitive || (extractable == false)) {
+            if (sensitive || !extractable || (isNSS && tokenObject)) {
                 return null;
             } else {
                 return "RAW";
             }
         }
-        @Override
+
         byte[] getEncodedInternal() {
             token.ensureValid();
             if (getFormat() == null) {
                 return null;
             }
+
             byte[] b = encoded;
             if (b == null) {
                 synchronized (this) {
                     b = encoded;
                     if (b == null) {
-                        Session tempSession = null;
-                        long keyID = this.getKeyID();
-                        try {
-                            tempSession = token.getOpSession();
-                            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
+                        b = fetchAttributes(new CK_ATTRIBUTE[] {
                                 new CK_ATTRIBUTE(CKA_VALUE),
-                            };
-                            token.p11.C_GetAttributeValue
-                                    (tempSession.id(), keyID, attributes);
-                            b = attributes[0].getByteArray();
-                        } catch (PKCS11Exception e) {
-                            throw new ProviderException(e);
-                        } finally {
-                            this.releaseKeyID();
-                            token.releaseSession(tempSession);
-                        }
+                        })[0].getByteArray();
                         encoded = b;
                     }
                 }
@@ -491,160 +520,260 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    private static class P11TlsMasterSecretKey extends P11SecretKey
-            implements TlsMasterSecret {
-        private static final long serialVersionUID = -1318560923770573441L;
+    // base class for all PKCS11 public keys
+    private static abstract class P11PublicKey extends P11Key implements
+            PublicKey {
+        @Serial
+        private static final long serialVersionUID = 1L;
 
-        private final int majorVersion, minorVersion;
-        P11TlsMasterSecretKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes, int major, int minor) {
+        protected byte[] encoded; // guard by synchronized
+
+        P11PublicKey(Session session, long keyID, String algorithm,
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(PUBLIC, session, keyID, algorithm, keyLength, attrs);
+        }
+    }
+
+    static final class P11PBEKey extends P11SecretKey
+            implements PBEKey {
+        private static final long serialVersionUID = 6847576994253634876L;
+        private char[] password;
+        private final byte[] salt;
+        private final int iterationCount;
+        P11PBEKey(Session session, long keyID, String algorithm,
+                int keyLength, CK_ATTRIBUTE[] attributes,
+                char[] password, byte[] salt, int iterationCount) {
             super(session, keyID, algorithm, keyLength, attributes);
-            this.majorVersion = major;
-            this.minorVersion = minor;
-        }
-        @Override
-        public int getMajorVersion() {
-            return majorVersion;
+            this.password = password.clone();
+            this.salt = salt.clone();
+            this.iterationCount = iterationCount;
         }
 
         @Override
-        public int getMinorVersion() {
-            return minorVersion;
+        public char[] getPassword() {
+            if (password == null) {
+                throw new IllegalStateException("password has been cleared");
+            }
+            return password.clone();
+        }
+
+        @Override
+        public byte[] getSalt() {
+            return salt.clone();
+        }
+
+        @Override
+        public int getIterationCount() {
+            return iterationCount;
+        }
+
+        void clearPassword() {
+            Arrays.fill(password, '\0');
+            password = null;
+        }
+    }
+
+    // impl class for sensitive/unextractable RSA private keys
+    static class P11RSAPrivateKeyInternal extends P11PrivateKey {
+        @Serial
+        private static final long serialVersionUID = -2138581185214187615L;
+
+        static P11RSAPrivateKeyInternal of(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs,
+                boolean keySensitive) {
+            P11RSAPrivateKeyInternal p11Key = null;
+            if (!keySensitive) {
+                // Key is not sensitive: try to interpret as CRT or non-CRT.
+                p11Key = asCRT(session, keyID, algorithm, keyLength, attrs);
+                if (p11Key == null) {
+                    p11Key = asNonCRT(session, keyID, algorithm, keyLength,
+                            attrs);
+                }
+            }
+            if (p11Key == null) {
+                // Key is sensitive or there was a failure while querying its
+                // attributes: handle as opaque.
+                p11Key = new P11RSAPrivateKeyInternal(session, keyID, algorithm,
+                        keyLength, attrs);
+            }
+            return p11Key;
+        }
+
+        private static CK_ATTRIBUTE[] tryFetchAttributes(Session session,
+                long keyID, long... attrTypes) {
+            int i = 0;
+            CK_ATTRIBUTE[] attrs = new CK_ATTRIBUTE[attrTypes.length];
+            for (long attrType : attrTypes) {
+                attrs[i++] = new CK_ATTRIBUTE(attrType);
+            }
+            try {
+                session.token.p11.C_GetAttributeValue(session.id(), keyID,
+                        attrs);
+                for (CK_ATTRIBUTE attr : attrs) {
+                    if (!(attr.pValue instanceof byte[])) {
+                        return null;
+                    }
+                }
+                return attrs;
+            } catch (PKCS11Exception ignored) {
+                // ignore, assume not available
+                return null;
+            }
+        }
+
+        private static P11RSAPrivateKeyInternal asCRT(Session session,
+                long keyID, String algorithm, int keyLength,
+                CK_ATTRIBUTE[] attrs) {
+            CK_ATTRIBUTE[] rsaCRTAttrs = tryFetchAttributes(session, keyID,
+                    CKA_MODULUS, CKA_PRIVATE_EXPONENT, CKA_PUBLIC_EXPONENT,
+                    CKA_PRIME_1, CKA_PRIME_2, CKA_EXPONENT_1, CKA_EXPONENT_2,
+                    CKA_COEFFICIENT);
+            if (rsaCRTAttrs == null) {
+                return null;
+            }
+            return new P11RSAPrivateKey(session, keyID, algorithm, keyLength,
+                    attrs, rsaCRTAttrs[0].getBigInteger(),
+                    rsaCRTAttrs[1].getBigInteger(),
+                    Arrays.copyOfRange(rsaCRTAttrs, 2, rsaCRTAttrs.length));
+        }
+
+        private static P11RSAPrivateKeyInternal asNonCRT(Session session,
+                long keyID, String algorithm, int keyLength,
+                CK_ATTRIBUTE[] attrs) {
+            CK_ATTRIBUTE[] rsaNonCRTAttrs = tryFetchAttributes(session, keyID,
+                    CKA_MODULUS, CKA_PRIVATE_EXPONENT);
+            if (rsaNonCRTAttrs == null) {
+                return null;
+            }
+            return new P11RSAPrivateNonCRTKey(session, keyID, algorithm,
+                    keyLength, attrs, rsaNonCRTAttrs[0].getBigInteger(),
+                    rsaNonCRTAttrs[1].getBigInteger());
+        }
+
+        protected transient BigInteger n;
+
+        private P11RSAPrivateKeyInternal(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
+        private synchronized void fetchValues() {
+            token.ensureValid();
+            if (n != null) return;
+
+            n = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_MODULUS)
+            })[0];
+        }
+
+        public BigInteger getModulus() {
+            fetchValues();
+            return n;
         }
     }
 
     // RSA CRT private key
-    private static final class P11RSAPrivateKey extends P11Key
-                implements RSAPrivateCrtKey {
+    private static final class P11RSAPrivateKey extends P11RSAPrivateKeyInternal
+            implements RSAPrivateCrtKey {
+        @Serial
         private static final long serialVersionUID = 9215872438913515220L;
 
-        private BigInteger n, e, d, p, q, pe, qe, coeff;
-        private byte[] encoded;
-        P11RSAPrivateKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
-        }
-        private synchronized void fetchValues() {
-            token.ensureValid();
-            if (n != null) {
-                return;
+        private transient BigInteger e, d, p, q, pe, qe, coeff;
+
+        private P11RSAPrivateKey(Session session, long keyID, String algorithm,
+                int keyLength, CK_ATTRIBUTE[] attrs, BigInteger n, BigInteger d,
+                CK_ATTRIBUTE[] crtAttrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+
+            this.n = n;
+            this.d = d;
+            for (CK_ATTRIBUTE a : crtAttrs) {
+                if (a.type == CKA_PUBLIC_EXPONENT) {
+                    e = a.getBigInteger();
+                } else if (a.type == CKA_PRIME_1) {
+                    p = a.getBigInteger();
+                } else if (a.type == CKA_PRIME_2) {
+                    q = a.getBigInteger();
+                } else if (a.type == CKA_EXPONENT_1) {
+                    pe = a.getBigInteger();
+                } else if (a.type == CKA_EXPONENT_2) {
+                    qe = a.getBigInteger();
+                } else if (a.type == CKA_COEFFICIENT) {
+                    coeff = a.getBigInteger();
+                }
             }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
-                new CK_ATTRIBUTE(CKA_MODULUS),
-                new CK_ATTRIBUTE(CKA_PUBLIC_EXPONENT),
-                new CK_ATTRIBUTE(CKA_PRIVATE_EXPONENT),
-                new CK_ATTRIBUTE(CKA_PRIME_1),
-                new CK_ATTRIBUTE(CKA_PRIME_2),
-                new CK_ATTRIBUTE(CKA_EXPONENT_1),
-                new CK_ATTRIBUTE(CKA_EXPONENT_2),
-                new CK_ATTRIBUTE(CKA_COEFFICIENT),
-            };
-            fetchAttributes(attributes);
-            n = attributes[0].getBigInteger();
-            e = attributes[1].getBigInteger();
-            d = attributes[2].getBigInteger();
-            p = attributes[3].getBigInteger();
-            q = attributes[4].getBigInteger();
-            pe = attributes[5].getBigInteger();
-            qe = attributes[6].getBigInteger();
-            coeff = attributes[7].getBigInteger();
         }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
-                fetchValues();
                 try {
-                    Key newKey = RSAPrivateCrtKeyImpl.newKey
-                        (KeyType.RSA, null, n, e, d, p, q, pe, qe, coeff);
-                    encoded = newKey.getEncoded();
+                    encoded = KeyFactory.getInstance("RSA", P11Util.getSunRsaSignProvider())
+                        .generatePrivate(new RSAPrivateCrtKeySpec(n, e, d, p, q, pe, qe, coeff))
+                        .getEncoded();
                 } catch (GeneralSecurityException e) {
                     throw new ProviderException(e);
                 }
             }
             return encoded;
         }
+
         @Override
         public BigInteger getModulus() {
-            fetchValues();
             return n;
         }
-        @Override
         public BigInteger getPublicExponent() {
-            fetchValues();
             return e;
         }
-        @Override
         public BigInteger getPrivateExponent() {
-            fetchValues();
             return d;
         }
-        @Override
         public BigInteger getPrimeP() {
-            fetchValues();
             return p;
         }
-        @Override
         public BigInteger getPrimeQ() {
-            fetchValues();
             return q;
         }
-        @Override
         public BigInteger getPrimeExponentP() {
-            fetchValues();
             return pe;
         }
-        @Override
         public BigInteger getPrimeExponentQ() {
-            fetchValues();
             return qe;
         }
-        @Override
         public BigInteger getCrtCoefficient() {
-            fetchValues();
             return coeff;
         }
     }
 
     // RSA non-CRT private key
-    private static final class P11RSAPrivateNonCRTKey extends P11Key
-                implements RSAPrivateKey {
+    private static final class P11RSAPrivateNonCRTKey extends
+            P11RSAPrivateKeyInternal implements RSAPrivateKey {
+        @Serial
         private static final long serialVersionUID = 1137764983777411481L;
 
-        private BigInteger n, d;
-        private byte[] encoded;
+        private transient BigInteger d;
+
         P11RSAPrivateNonCRTKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs, BigInteger n,
+                BigInteger d) {
+            super(session, keyID, algorithm, keyLength, attrs);
+            this.n = n;
+            this.d = d;
         }
-        private synchronized void fetchValues() {
-            token.ensureValid();
-            if (n != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
-                new CK_ATTRIBUTE(CKA_MODULUS),
-                new CK_ATTRIBUTE(CKA_PRIVATE_EXPONENT),
-            };
-            fetchAttributes(attributes);
-            n = attributes[0].getBigInteger();
-            d = attributes[1].getBigInteger();
-        }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
-                fetchValues();
                 try {
                     // XXX make constructor in SunRsaSign provider public
                     // and call it directly
@@ -658,70 +787,66 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
+
         @Override
         public BigInteger getModulus() {
-            fetchValues();
             return n;
         }
-        @Override
         public BigInteger getPrivateExponent() {
-            fetchValues();
             return d;
         }
     }
 
-    private static final class P11RSAPublicKey extends P11Key
+    private static final class P11RSAPublicKey extends P11PublicKey
                                                 implements RSAPublicKey {
+        @Serial
         private static final long serialVersionUID = -826726289023854455L;
-        private BigInteger n, e;
-        private byte[] encoded;
+        private transient BigInteger n, e;
+
         P11RSAPublicKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PUBLIC, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
         }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (n != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
+            if (n != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
                 new CK_ATTRIBUTE(CKA_MODULUS),
-                new CK_ATTRIBUTE(CKA_PUBLIC_EXPONENT),
-            };
-            fetchAttributes(attributes);
-            n = attributes[0].getBigInteger();
-            e = attributes[1].getBigInteger();
+                new CK_ATTRIBUTE(CKA_PUBLIC_EXPONENT)
+            });
+            n = res[0];
+            e = res[1];
         }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
                 fetchValues();
                 try {
-                    encoded = RSAPublicKeyImpl.newKey
-                        (KeyType.RSA, null, n, e).getEncoded();
-                } catch (InvalidKeyException e) {
+                    encoded = KeyFactory.getInstance("RSA", P11Util.getSunRsaSignProvider())
+                        .generatePublic(new RSAPublicKeySpec(n, e)).getEncoded();
+                } catch (GeneralSecurityException e) {
                     throw new ProviderException(e);
                 }
             }
             return encoded;
         }
-        @Override
+
         public BigInteger getModulus() {
             fetchValues();
             return n;
         }
-        @Override
         public BigInteger getPublicExponent() {
             fetchValues();
             return e;
         }
-        @Override
         public String toString() {
             fetchValues();
             return super.toString() +  "\n  modulus: " + n
@@ -729,67 +854,59 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    private static final class P11DSAPublicKey extends P11Key
+    private static final class P11DSAPublicKey extends P11PublicKey
                                                 implements DSAPublicKey {
+        @Serial
         private static final long serialVersionUID = 5989753793316396637L;
 
-        private BigInteger y;
-        private DSAParams params;
-        private byte[] encoded;
+        private transient BigInteger y;
+        private transient DSAParams params;
+
         P11DSAPublicKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PUBLIC, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
         }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (y != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
+            if (y != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
                 new CK_ATTRIBUTE(CKA_VALUE),
                 new CK_ATTRIBUTE(CKA_PRIME),
                 new CK_ATTRIBUTE(CKA_SUBPRIME),
-                new CK_ATTRIBUTE(CKA_BASE),
-            };
-            fetchAttributes(attributes);
-            y = attributes[0].getBigInteger();
-            params = new DSAParameterSpec(
-                attributes[1].getBigInteger(),
-                attributes[2].getBigInteger(),
-                attributes[3].getBigInteger()
-            );
+                new CK_ATTRIBUTE(CKA_BASE)
+            });
+            y = res[0];
+            params = new DSAParameterSpec(res[1], res[2], res[3]);
         }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
                 fetchValues();
                 try {
-                    Key key = new sun.security.provider.DSAPublicKey
-                            (y, params.getP(), params.getQ(), params.getG());
-                    encoded = key.getEncoded();
-                } catch (InvalidKeyException e) {
+                    encoded = P11DSAKeyFactory.sunDsaKeyFactory().generatePublic(new DSAPublicKeySpec
+                            (y, params.getP(), params.getQ(), params.getG())).getEncoded();
+                } catch (InvalidKeySpecException e) {
                     throw new ProviderException(e);
                 }
             }
             return encoded;
         }
-        @Override
         public BigInteger getY() {
             fetchValues();
             return y;
         }
-        @Override
         public DSAParams getParams() {
             fetchValues();
             return params;
         }
-        @Override
         public String toString() {
             fetchValues();
             return super.toString() +  "\n  y: " + y + "\n  p: " + params.getP()
@@ -797,61 +914,97 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    private static final class P11DSAPrivateKey extends P11Key
-                                                implements DSAPrivateKey {
+    static class P11DSAPrivateKeyInternal extends P11PrivateKey {
+        @Serial
         private static final long serialVersionUID = 3119629997181999389L;
 
-        private BigInteger x;
-        private DSAParams params;
-        private byte[] encoded;
-        P11DSAPrivateKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
+        protected transient DSAParams params;
+
+        static P11DSAPrivateKeyInternal of(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs,
+                boolean keySensitive) {
+            if (keySensitive) {
+                return new P11DSAPrivateKeyInternal(session, keyID, algorithm,
+                        keyLength, attrs);
+            } else {
+                return new P11DSAPrivateKey(session, keyID, algorithm,
+                        keyLength, attrs);
+            }
         }
+
+        private P11DSAPrivateKeyInternal(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (x != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
-                new CK_ATTRIBUTE(CKA_VALUE),
-                new CK_ATTRIBUTE(CKA_PRIME),
-                new CK_ATTRIBUTE(CKA_SUBPRIME),
-                new CK_ATTRIBUTE(CKA_BASE),
-            };
-            fetchAttributes(attributes);
-            x = attributes[0].getBigInteger();
-            params = new DSAParameterSpec(
-                attributes[1].getBigInteger(),
-                attributes[2].getBigInteger(),
-                attributes[3].getBigInteger()
-            );
+            if (params != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_PRIME),
+                    new CK_ATTRIBUTE(CKA_SUBPRIME),
+                    new CK_ATTRIBUTE(CKA_BASE),
+            });
+            params = new DSAParameterSpec(res[0], res[1], res[2]);
         }
-        @Override
+
+        public DSAParams getParams() {
+            fetchValues();
+            return params;
+        }
+    }
+
+    private static final class P11DSAPrivateKey extends P11DSAPrivateKeyInternal
+                                        implements DSAPrivateKey {
+        @Serial
+        private static final long serialVersionUID = 3119629997181999389L;
+
+        private transient BigInteger x; // params inside P11DSAPrivateKeyInternal
+
+        P11DSAPrivateKey(Session session, long keyID, String algorithm,
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
+        private synchronized void fetchValues() {
+            token.ensureValid();
+            if (x != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_VALUE),
+                    new CK_ATTRIBUTE(CKA_PRIME),
+                    new CK_ATTRIBUTE(CKA_SUBPRIME),
+                    new CK_ATTRIBUTE(CKA_BASE),
+            });
+            x = res[0];
+            params = new DSAParameterSpec(res[1], res[2], res[3]);
+        }
+
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
                 fetchValues();
                 try {
-                    Key key = new sun.security.provider.DSAPrivateKey
-                            (x, params.getP(), params.getQ(), params.getG());
-                    encoded = key.getEncoded();
-                } catch (InvalidKeyException e) {
+                    encoded = P11DSAKeyFactory.sunDsaKeyFactory().generatePrivate(new DSAPrivateKeySpec
+                            (x, params.getP(), params.getQ(), params.getG())).getEncoded();
+                } catch (InvalidKeySpecException e) {
                     throw new ProviderException(e);
                 }
             }
             return encoded;
         }
-        @Override
+
         public BigInteger getX() {
             fetchValues();
             return x;
         }
+
         @Override
         public DSAParams getParams() {
             fetchValues();
@@ -859,40 +1012,76 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    private static final class P11DHPrivateKey extends P11Key
-                                                implements DHPrivateKey {
-        private static final long serialVersionUID = -1698576167364928838L;
+    static class P11DHPrivateKeyInternal extends P11PrivateKey {
+        @Serial
+        private static final long serialVersionUID = 1L;
 
-        private BigInteger x;
-        private DHParameterSpec params;
-        private byte[] encoded;
-        P11DHPrivateKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
+        protected transient DHParameterSpec params;
+
+        static P11DHPrivateKeyInternal of(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs,
+                boolean keySensitive) {
+            if (keySensitive) {
+                return new P11DHPrivateKeyInternal(session, keyID, algorithm,
+                        keyLength, attrs);
+            } else {
+                return new P11DHPrivateKey(session, keyID, algorithm,
+                        keyLength, attrs);
+            }
         }
+
+        private P11DHPrivateKeyInternal(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (x != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
-                new CK_ATTRIBUTE(CKA_VALUE),
-                new CK_ATTRIBUTE(CKA_PRIME),
-                new CK_ATTRIBUTE(CKA_BASE),
-            };
-            fetchAttributes(attributes);
-            x = attributes[0].getBigInteger();
-            params = new DHParameterSpec(
-                attributes[1].getBigInteger(),
-                attributes[2].getBigInteger()
-            );
+            if (params != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_PRIME),
+                    new CK_ATTRIBUTE(CKA_BASE),
+            });
+            params = new DHParameterSpec(res[0], res[1]);
         }
-        @Override
+
+        public DHParameterSpec getParams() {
+            fetchValues();
+            return params;
+        }
+    }
+
+    private static final class P11DHPrivateKey extends P11DHPrivateKeyInternal
+                                                implements DHPrivateKey {
+        @Serial
+        private static final long serialVersionUID = -1698576167364928838L;
+
+        private transient BigInteger x; // params in P11DHPrivateKeyInternal
+
+        P11DHPrivateKey(Session session, long keyID, String algorithm,
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
+        private synchronized void fetchValues() {
+            token.ensureValid();
+            if (x != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_VALUE),
+                    new CK_ATTRIBUTE(CKA_PRIME),
+                    new CK_ATTRIBUTE(CKA_BASE),
+            });
+            x = res[0];
+            params = new DHParameterSpec(res[1], res[2]);
+        }
+
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -910,29 +1099,25 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
-        @Override
         public BigInteger getX() {
             fetchValues();
             return x;
         }
-        @Override
         public DHParameterSpec getParams() {
             fetchValues();
             return params;
         }
-        @Override
         public int hashCode() {
-            if (token.isValid() == false) {
+            fetchValues();
+            if (!token.isValid()) {
                 return 0;
             }
-            fetchValues();
             return Objects.hash(x, params.getP(), params.getG());
         }
-        @Override
         public boolean equals(Object obj) {
             if (this == obj) return true;
             // equals() should never throw exceptions
-            if (token.isValid() == false) {
+            if (!token.isValid()) {
                 return false;
             }
             if (!(obj instanceof DHPrivateKey)) {
@@ -947,40 +1132,36 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    private static final class P11DHPublicKey extends P11Key
+    private static final class P11DHPublicKey extends P11PublicKey
                                                 implements DHPublicKey {
         static final long serialVersionUID = -598383872153843657L;
 
-        private BigInteger y;
-        private DHParameterSpec params;
-        private byte[] encoded;
+        private transient BigInteger y;
+        private transient DHParameterSpec params;
+
         P11DHPublicKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PUBLIC, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
         }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (y != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
-                new CK_ATTRIBUTE(CKA_VALUE),
-                new CK_ATTRIBUTE(CKA_PRIME),
-                new CK_ATTRIBUTE(CKA_BASE),
-            };
-            fetchAttributes(attributes);
-            y = attributes[0].getBigInteger();
-            params = new DHParameterSpec(
-                attributes[1].getBigInteger(),
-                attributes[2].getBigInteger()
-            );
+            if (y != null) return;
+
+            BigInteger[] res = fetchAttributesAsInts(new CK_ATTRIBUTE[] {
+                    new CK_ATTRIBUTE(CKA_VALUE),
+                    new CK_ATTRIBUTE(CKA_PRIME),
+                    new CK_ATTRIBUTE(CKA_BASE),
+            });
+            y = res[0];
+            params = new DHParameterSpec(res[1], res[2]);
         }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
@@ -998,42 +1179,36 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
-        @Override
         public BigInteger getY() {
             fetchValues();
             return y;
         }
-        @Override
         public DHParameterSpec getParams() {
             fetchValues();
             return params;
         }
-        @Override
         public String toString() {
             fetchValues();
             return super.toString() +  "\n  y: " + y + "\n  p: " + params.getP()
                 + "\n  g: " + params.getG();
         }
-        @Override
         public int hashCode() {
-            if (token.isValid() == false) {
+            if (!token.isValid()) {
                 return 0;
             }
             fetchValues();
             return Objects.hash(y, params.getP(), params.getG());
         }
-        @Override
         public boolean equals(Object obj) {
             if (this == obj) return true;
             // equals() should never throw exceptions
-            if (token.isValid() == false) {
+            if (!token.isValid()) {
                 return false;
             }
-            if (!(obj instanceof DHPublicKey)) {
+            if (!(obj instanceof DHPublicKey other)) {
                 return false;
             }
             fetchValues();
-            DHPublicKey other = (DHPublicKey) obj;
             DHParameterSpec otherParams = other.getParams();
             return ((this.y.compareTo(other.getY()) == 0) &&
                     (this.params.getP().compareTo(otherParams.getP()) == 0) &&
@@ -1041,47 +1216,91 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    private static final class P11ECPrivateKey extends P11Key
-                                                implements ECPrivateKey {
-        private static final long serialVersionUID = -7786054399510515515L;
+    static class P11ECPrivateKeyInternal extends P11PrivateKey {
 
-        private BigInteger s;
-        private ECParameterSpec params;
-        private byte[] encoded;
-        P11ECPrivateKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PRIVATE, session, keyID, algorithm, keyLength, attributes);
+        @Serial
+        private static final long serialVersionUID = 1L;
+
+        protected transient ECParameterSpec params;
+
+        static P11ECPrivateKeyInternal of(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs,
+                boolean keySensitive) {
+            if (keySensitive) {
+                return new P11ECPrivateKeyInternal(session, keyID, algorithm,
+                        keyLength, attrs);
+            } else {
+                return new P11ECPrivateKey(session, keyID, algorithm,
+                        keyLength, attrs);
+            }
         }
+
+        private P11ECPrivateKeyInternal(Session session, long keyID,
+                String algorithm, int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (s != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
-                new CK_ATTRIBUTE(CKA_VALUE),
-                new CK_ATTRIBUTE(CKA_EC_PARAMS, params),
-            };
-            fetchAttributes(attributes);
-            s = attributes[0].getBigInteger();
+            if (params != null) return;
+
             try {
-                params = P11ECKeyFactory.decodeParameters
-                            (attributes[1].getByteArray());
+                byte[] paramBytes = fetchAttributes(new CK_ATTRIBUTE[] {
+                        new CK_ATTRIBUTE(CKA_EC_PARAMS)
+                })[0].getByteArray();
+
+                params = P11ECKeyFactory.decodeParameters(paramBytes);
             } catch (Exception e) {
                 throw new RuntimeException("Could not parse key values", e);
             }
         }
-        @Override
+
+        public ECParameterSpec getParams() {
+            fetchValues();
+            return params;
+        }
+    }
+
+    private static final class P11ECPrivateKey extends P11ECPrivateKeyInternal
+                                                implements ECPrivateKey {
+        @Serial
+        private static final long serialVersionUID = -7786054399510515515L;
+
+        private transient BigInteger s; // params in P11ECPrivateKeyInternal
+
+        P11ECPrivateKey(Session session, long keyID, String algorithm,
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
+        }
+
+        private synchronized void fetchValues() {
+            token.ensureValid();
+            if (s != null) return;
+
+            CK_ATTRIBUTE[] attrs = fetchAttributes(new CK_ATTRIBUTE[] {
+                new CK_ATTRIBUTE(CKA_VALUE),
+                new CK_ATTRIBUTE(CKA_EC_PARAMS),
+            });
+
+            s = attrs[0].getBigInteger();
+            try {
+                params = P11ECKeyFactory.decodeParameters
+                            (attrs[1].getByteArray());
+            } catch (Exception e) {
+                throw new RuntimeException("Could not parse key values", e);
+            }
+        }
+
         public String getFormat() {
             token.ensureValid();
             return "PKCS#8";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
-            token.ensureValid();
             if (encoded == null) {
-                fetchValues();
                 try {
-                    Key key = P11ECUtil.generateECPrivateKey(s, params);
+                    fetchValues();
+                    Key key = P11ECUtil.generatePrivateKey(s, params);
                     encoded = key.getEncoded();
                 } catch (InvalidKeySpecException e) {
                     throw new ProviderException(e);
@@ -1089,56 +1308,50 @@ abstract class P11Key implements Key, Length {
             }
             return encoded;
         }
-        @Override
+
         public BigInteger getS() {
             fetchValues();
             return s;
         }
-        @Override
+
         public ECParameterSpec getParams() {
             fetchValues();
             return params;
         }
     }
 
-    private static final class P11ECPublicKey extends P11Key
+    private static final class P11ECPublicKey extends P11PublicKey
                                                 implements ECPublicKey {
+        @Serial
         private static final long serialVersionUID = -6371481375154806089L;
 
-        private ECPoint w;
-        private ECParameterSpec params;
-        private byte[] encoded;
+        private transient ECPoint w;
+        private transient ECParameterSpec params;
+
         P11ECPublicKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attributes) {
-            super(PUBLIC, session, keyID, algorithm, keyLength, attributes);
+                int keyLength, CK_ATTRIBUTE[] attrs) {
+            super(session, keyID, algorithm, keyLength, attrs);
         }
+
         private synchronized void fetchValues() {
             token.ensureValid();
-            if (w != null) {
-                return;
-            }
-            CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
+            if (w != null) return;
+
+            CK_ATTRIBUTE[] attrs = fetchAttributes(new CK_ATTRIBUTE[] {
                 new CK_ATTRIBUTE(CKA_EC_POINT),
                 new CK_ATTRIBUTE(CKA_EC_PARAMS),
-            };
-            fetchAttributes(attributes);
+            });
 
             try {
                 params = P11ECKeyFactory.decodeParameters
-                            (attributes[1].getByteArray());
-                byte[] ecKey = attributes[0].getByteArray();
+                            (attrs[1].getByteArray());
+                byte[] ecKey = attrs[0].getByteArray();
 
                 // Check whether the X9.63 encoding of an EC point is wrapped
                 // in an ASN.1 OCTET STRING
                 if (!token.config.getUseEcX963Encoding()) {
-                    DerValue wECPoint = new DerValue(ecKey);
-
-                    if (wECPoint.getTag() != DerValue.tag_OctetString) {
-                        throw new IOException("Could not DER decode EC point." +
-                            " Unexpected tag: " + wECPoint.getTag());
-                    }
                     w = P11ECKeyFactory.decodePoint
-                        (wECPoint.getDataBytes(), params.getCurve());
+                        (DerUtil.decode(DerUtil.TAG_OCTET_STRING, ecKey), params.getCurve());
 
                 } else {
                     w = P11ECKeyFactory.decodePoint(ecKey, params.getCurve());
@@ -1148,35 +1361,32 @@ abstract class P11Key implements Key, Length {
                 throw new RuntimeException("Could not parse key values", e);
             }
         }
-        @Override
+
         public String getFormat() {
             token.ensureValid();
             return "X.509";
         }
-        @Override
+
         synchronized byte[] getEncodedInternal() {
             token.ensureValid();
             if (encoded == null) {
                 fetchValues();
                 try {
-                    return P11ECUtil.x509EncodeECPublicKey(w, params);
+                    return P11ECUtil.x509EncodePublicKey(w, params);
                 } catch (InvalidKeySpecException e) {
                     throw new ProviderException(e);
                 }
             }
             return encoded;
         }
-        @Override
         public ECPoint getW() {
             fetchValues();
             return w;
         }
-        @Override
         public ECParameterSpec getParams() {
             fetchValues();
             return params;
         }
-        @Override
         public String toString() {
             fetchValues();
             return super.toString()
@@ -1186,7 +1396,6 @@ abstract class P11Key implements Key, Length {
         }
     }
 }
-
 final class NativeKeyHolder {
 
     private static long nativeKeyWrapperKeyID = 0;
@@ -1202,7 +1411,7 @@ final class NativeKeyHolder {
     private long keyID;
 
     // phantom reference notification clean up for session keys
-    private SessionKeyRef ref;
+    private final SessionKeyRef ref;
 
     private int refCount;
 
@@ -1225,7 +1434,7 @@ final class NativeKeyHolder {
             nativeKeyWrapperSession = s;
             nativeKeyWrapperSession.addObject();
             byte[] iv = new byte[16];
-            JCAUtil.getSecureRandom().nextBytes(iv);
+            P11Util.getSecureRandom().nextBytes(iv);
             nativeKeyWrapperMechanism = new CK_MECHANISM(CKM_AES_CBC_PAD, iv);
         } catch (PKCS11Exception e) {
             // best effort
@@ -1311,6 +1520,7 @@ final class NativeKeyHolder {
             this.ref = new SessionKeyRef(p11Key, keyID, wrapperKeyUsed,
                     keySession);
         }
+
         this.nativeKeyInfo = ((ki == null || ki.length == 0)? null : ki);
     }
 
@@ -1384,22 +1594,9 @@ final class NativeKeyHolder {
  * still use these keys during finalization such as SSLSocket.
  */
 final class SessionKeyRef extends PhantomReference<P11Key> {
-    private static ReferenceQueue<P11Key> refQueue =
-        new ReferenceQueue<P11Key>();
+    static ReferenceQueue<P11Key> refQueue = new ReferenceQueue<>();
     private static Set<SessionKeyRef> refSet =
-        Collections.synchronizedSet(new HashSet<SessionKeyRef>());
-
-    static ReferenceQueue<P11Key> referenceQueue() {
-        return refQueue;
-    }
-
-    private static void drainRefQueueBounded() {
-        while (true) {
-            SessionKeyRef next = (SessionKeyRef) refQueue.poll();
-            if (next == null) break;
-            next.dispose();
-        }
-    }
+        Collections.synchronizedSet(new HashSet<>());
 
     // handle to the native key and the session it is generated under
     private long keyID;
@@ -1410,14 +1607,13 @@ final class SessionKeyRef extends PhantomReference<P11Key> {
             Session session) {
         super(p11Key, refQueue);
         if (session == null) {
-            throw new ProviderException("key must be associated with a session");
+            throw new ProviderException
+                    ("key must be associated with a session");
         }
         registerNativeKey(keyID, session);
         this.wrapperKeyUsed = wrapperKeyUsed;
 
         refSet.add(this);
-        // TBD: run at some interval and not every time?
-        drainRefQueueBounded();
     }
 
     void registerNativeKey(long newKeyID, Session newSession) {
@@ -1469,3 +1665,4 @@ final class SessionKeyRef extends PhantomReference<P11Key> {
         this.clear();
     }
 }
+

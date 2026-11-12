@@ -1,26 +1,15 @@
 /*
- * Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ * Copyright (c) 2026, Josef Cacek. All rights reserved.
  *
  * This code is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 only, as
- * published by the Free Software Foundation.  Oracle designates this
- * particular file as subject to the "Classpath" exception as provided
- * by Oracle in the LICENSE file that accompanied this code.
+ * published by the Free Software Foundation, with the "Classpath" exception
+ * as provided in the LICENSE file of the OpenJDK project.
  *
  * This code is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * version 2 for more details (a copy is included in the LICENSE file that
- * accompanied this code).
- *
- * You should have received a copy of the GNU General Public License version
- * 2 along with this work; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
- *
- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
- * or visit www.oracle.com if you need additional information or have any
- * questions.
+ * version 2 for more details.
  */
 
 package com.github.kwart.jsign.pkcs11;
@@ -28,87 +17,154 @@ package com.github.kwart.jsign.pkcs11;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.security.*;
-import java.security.interfaces.*;
 import java.security.spec.*;
+import java.util.Arrays;
 
-import sun.security.ec.ECPublicKeyImpl;
-import sun.security.ec.ECPrivateKeyImpl;
-import sun.security.x509.X509Key;
-
+/**
+ * EC helpers built on the public SunEC APIs, replacing sun.security.util.ECUtil.
+ */
 final class P11ECUtil {
 
-    static ECPublicKey decodeX509ECPublicKey(byte[] encoded)
-            throws InvalidKeySpecException {
-        X509EncodedKeySpec keySpec = new X509EncodedKeySpec(encoded);
-
-        return (ECPublicKey)ECGeneratePublic(keySpec);
+    private P11ECUtil() {
     }
 
-    static byte[] x509EncodeECPublicKey(ECPoint w,
-            ECParameterSpec params) throws InvalidKeySpecException {
-        ECPublicKeySpec keySpec = new ECPublicKeySpec(w, params);
-        X509Key key = (X509Key)ECGeneratePublic(keySpec);
-
-        return key.getEncoded();
+    static Provider getSunECProvider() {
+        Provider p = Security.getProvider("SunEC");
+        if (p == null) {
+            throw new ProviderException("Cannot load SunEC provider");
+        }
+        return p;
     }
 
-    static ECPrivateKey decodePKCS8ECPrivateKey(byte[] encoded)
-            throws InvalidKeySpecException {
-        PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
-
-        return (ECPrivateKey)ECGeneratePrivate(keySpec);
-    }
-
-    static ECPrivateKey generateECPrivateKey(BigInteger s,
-            ECParameterSpec params) throws InvalidKeySpecException {
-        ECPrivateKeySpec keySpec = new ECPrivateKeySpec(s, params);
-
-        return (ECPrivateKey)ECGeneratePrivate(keySpec);
-    }
-
-    private static PublicKey ECGeneratePublic(KeySpec keySpec)
-            throws InvalidKeySpecException {
+    private static AlgorithmParameters newParameters() {
         try {
-            if (keySpec instanceof X509EncodedKeySpec) {
-               X509EncodedKeySpec x509Spec = (X509EncodedKeySpec)keySpec;
-                return new ECPublicKeyImpl(x509Spec.getEncoded());
-            } else if (keySpec instanceof ECPublicKeySpec) {
-                ECPublicKeySpec ecSpec = (ECPublicKeySpec)keySpec;
-                return new ECPublicKeyImpl(
-                    ecSpec.getW(),
-                    ecSpec.getParams()
-                );
-            } else {
-                throw new InvalidKeySpecException("Only ECPublicKeySpec "
-                    + "and X509EncodedKeySpec supported for EC public keys");
-            }
-        } catch (InvalidKeySpecException e) {
-            throw e;
-        } catch (GeneralSecurityException e) {
-            throw new InvalidKeySpecException(e);
+            return AlgorithmParameters.getInstance("EC", getSunECProvider());
+        } catch (NoSuchAlgorithmException e) {
+            throw new ProviderException(e);
         }
     }
 
-    private static PrivateKey ECGeneratePrivate(KeySpec keySpec)
-            throws InvalidKeySpecException {
+    private static KeyFactory keyFactory() {
         try {
-            if (keySpec instanceof PKCS8EncodedKeySpec) {
-                PKCS8EncodedKeySpec pkcsSpec = (PKCS8EncodedKeySpec)keySpec;
-                return new ECPrivateKeyImpl(pkcsSpec.getEncoded());
-            } else if (keySpec instanceof ECPrivateKeySpec) {
-                ECPrivateKeySpec ecSpec = (ECPrivateKeySpec)keySpec;
-                return new ECPrivateKeyImpl(ecSpec.getS(), ecSpec.getParams());
-            } else {
-                throw new InvalidKeySpecException("Only ECPrivateKeySpec "
-                    + "and PKCS8EncodedKeySpec supported for EC private keys");
-            }
-        } catch (InvalidKeySpecException e) {
-            throw e;
-        } catch (GeneralSecurityException e) {
-            throw new InvalidKeySpecException(e);
+            return KeyFactory.getInstance("EC", getSunECProvider());
+        } catch (NoSuchAlgorithmException e) {
+            throw new ProviderException(e);
         }
     }
 
-    private P11ECUtil() {}
+    /**
+     * Returns the named curve parameters, or null if the curve is not known.
+     */
+    static ECParameterSpec getECParameterSpec(String name) {
+        try {
+            AlgorithmParameters parameters = newParameters();
+            parameters.init(new ECGenParameterSpec(name));
+            return parameters.getParameterSpec(ECParameterSpec.class);
+        } catch (InvalidParameterSpecException e) {
+            return null;
+        }
+    }
 
+    /**
+     * Returns parameters of the NIST prime curve with the given field size, or null.
+     */
+    static ECParameterSpec getECParameterSpec(int keySize) {
+        String name = switch (keySize) {
+            case 192 -> "secp192r1";
+            case 224 -> "secp224r1";
+            case 256 -> "secp256r1";
+            case 384 -> "secp384r1";
+            case 521 -> "secp521r1";
+            default -> null;
+        };
+        return name == null ? null : getECParameterSpec(name);
+    }
+
+    /**
+     * Returns the named curve matching the given parameters, or null if the
+     * curve is not supported.
+     */
+    static ECParameterSpec getECParameterSpec(ECParameterSpec spec) {
+        try {
+            AlgorithmParameters parameters = newParameters();
+            parameters.init(spec);
+            return parameters.getParameterSpec(ECParameterSpec.class);
+        } catch (InvalidParameterSpecException e) {
+            return null;
+        }
+    }
+
+    static ECParameterSpec decodeParameters(byte[] encoded) throws IOException {
+        try {
+            AlgorithmParameters parameters = newParameters();
+            parameters.init(encoded);
+            return parameters.getParameterSpec(ECParameterSpec.class);
+        } catch (InvalidParameterSpecException e) {
+            throw new IOException("Unsupported EC parameters", e);
+        }
+    }
+
+    /**
+     * Returns the DER encoded named curve OID, or null if not supported.
+     */
+    static byte[] encodeParameters(ECParameterSpec spec) {
+        try {
+            AlgorithmParameters parameters = newParameters();
+            parameters.init(spec);
+            return parameters.getEncoded();
+        } catch (InvalidParameterSpecException | IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Decodes an uncompressed X9.62 point.
+     */
+    static ECPoint decodePoint(byte[] data, EllipticCurve curve) throws IOException {
+        if ((data.length == 0) || (data[0] != 4)) {
+            throw new IOException("Only uncompressed point format supported");
+        }
+        int n = (data.length - 1) / 2;
+        if (n != ((curve.getField().getFieldSize() + 7) >> 3)) {
+            throw new IOException("Point does not match field size");
+        }
+        byte[] xb = Arrays.copyOfRange(data, 1, 1 + n);
+        byte[] yb = Arrays.copyOfRange(data, n + 1, n + 1 + n);
+        return new ECPoint(new BigInteger(1, xb), new BigInteger(1, yb));
+    }
+
+    /**
+     * Encodes the point in the uncompressed X9.62 format.
+     */
+    static byte[] encodePoint(ECPoint point, EllipticCurve curve) {
+        int n = (curve.getField().getFieldSize() + 7) >> 3;
+        byte[] xb = P11Util.trimZeroes(point.getAffineX().toByteArray());
+        byte[] yb = P11Util.trimZeroes(point.getAffineY().toByteArray());
+        if ((xb.length > n) || (yb.length > n)) {
+            throw new ProviderException("Point coordinates do not match field size");
+        }
+        byte[] b = new byte[1 + (n << 1)];
+        b[0] = 4; // uncompressed
+        System.arraycopy(xb, 0, b, n - xb.length + 1, xb.length);
+        System.arraycopy(yb, 0, b, b.length - yb.length, yb.length);
+        return b;
+    }
+
+    static PublicKey decodeX509PublicKey(byte[] encoded) throws InvalidKeySpecException {
+        return keyFactory().generatePublic(new X509EncodedKeySpec(encoded));
+    }
+
+    static PrivateKey decodePKCS8PrivateKey(byte[] encoded) throws InvalidKeySpecException {
+        return keyFactory().generatePrivate(new PKCS8EncodedKeySpec(encoded));
+    }
+
+    static PrivateKey generatePrivateKey(BigInteger s, ECParameterSpec params)
+            throws InvalidKeySpecException {
+        return keyFactory().generatePrivate(new ECPrivateKeySpec(s, params));
+    }
+
+    static byte[] x509EncodePublicKey(ECPoint w, ECParameterSpec params)
+            throws InvalidKeySpecException {
+        return keyFactory().generatePublic(new ECPublicKeySpec(w, params)).getEncoded();
+    }
 }

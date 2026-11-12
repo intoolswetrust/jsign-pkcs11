@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2011, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,8 +30,6 @@ import java.lang.ref.*;
 
 import java.security.Key;
 
-import sun.security.util.Cache;
-
 /**
  * Key to P11Key translation cache. The PKCS#11 token can only perform
  * operations on keys stored on the token (permanently or temporarily). That
@@ -48,12 +46,20 @@ import sun.security.util.Cache;
  */
 final class KeyCache {
 
-    private final Cache<IdentityWrapper, P11Key> strongCache;
+    private static final int STRONG_CACHE_SIZE = 16;
+
+    // LRU cache with strong references, all access is synchronized
+    private final Map<IdentityWrapper, P11Key> strongCache;
 
     private WeakReference<Map<Key,P11Key>> cacheReference;
 
     KeyCache() {
-        strongCache = Cache.newHardMemoryCache(16);
+        strongCache = new LinkedHashMap<>(STRONG_CACHE_SIZE, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<IdentityWrapper, P11Key> eldest) {
+                return size() > STRONG_CACHE_SIZE;
+            }
+        };
     }
 
     private static final class IdentityWrapper {
@@ -65,7 +71,7 @@ final class KeyCache {
             if (this == o) {
                 return true;
             }
-            if (o instanceof IdentityWrapper == false) {
+            if (!(o instanceof IdentityWrapper)) {
                 return false;
             }
             IdentityWrapper other = (IdentityWrapper)o;
@@ -100,4 +106,8 @@ final class KeyCache {
         map.put(key, p11Key);
     }
 
+    synchronized void clear() {
+        strongCache.clear();
+        cacheReference = null;
+    }
 }

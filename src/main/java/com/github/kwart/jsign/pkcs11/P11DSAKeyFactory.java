@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,9 +31,8 @@ import java.security.*;
 import java.security.interfaces.*;
 import java.security.spec.*;
 
-import sun.security.pkcs11.wrapper.*;
-
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
+import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
 /**
@@ -48,10 +47,18 @@ final class P11DSAKeyFactory extends P11KeyFactory {
         super(token, algorithm);
     }
 
+    // replaces the sun.security.provider DSA key implementations
+    static KeyFactory sunDsaKeyFactory() {
+        try {
+            return KeyFactory.getInstance("DSA", P11Util.getSunProvider());
+        } catch (NoSuchAlgorithmException e) {
+            throw new ProviderException(e);
+        }
+    }
+
     PublicKey implTranslatePublicKey(PublicKey key) throws InvalidKeyException {
         try {
-            if (key instanceof DSAPublicKey) {
-                DSAPublicKey dsaKey = (DSAPublicKey)key;
+            if (key instanceof DSAPublicKey dsaKey) {
                 DSAParams params = dsaKey.getParams();
                 return generatePublic(
                     dsaKey.getY(),
@@ -62,7 +69,11 @@ final class P11DSAKeyFactory extends P11KeyFactory {
             } else if ("X.509".equals(key.getFormat())) {
                 // let Sun provider parse for us, then recurse
                 byte[] encoded = key.getEncoded();
-                key = new sun.security.provider.DSAPublicKey(encoded);
+                try {
+                    key = sunDsaKeyFactory().generatePublic(new X509EncodedKeySpec(encoded));
+                } catch (InvalidKeySpecException e) {
+                    throw new InvalidKeyException(e);
+                }
                 return implTranslatePublicKey(key);
             } else {
                 throw new InvalidKeyException("PublicKey must be instance "
@@ -76,8 +87,7 @@ final class P11DSAKeyFactory extends P11KeyFactory {
     PrivateKey implTranslatePrivateKey(PrivateKey key)
             throws InvalidKeyException {
         try {
-            if (key instanceof DSAPrivateKey) {
-                DSAPrivateKey dsaKey = (DSAPrivateKey)key;
+            if (key instanceof DSAPrivateKey dsaKey) {
                 DSAParams params = dsaKey.getParams();
                 return generatePrivate(
                     dsaKey.getX(),
@@ -88,7 +98,11 @@ final class P11DSAKeyFactory extends P11KeyFactory {
             } else if ("PKCS#8".equals(key.getFormat())) {
                 // let Sun provider parse for us, then recurse
                 byte[] encoded = key.getEncoded();
-                key = new sun.security.provider.DSAPrivateKey(encoded);
+                try {
+                    key = sunDsaKeyFactory().generatePrivate(new PKCS8EncodedKeySpec(encoded));
+                } catch (InvalidKeySpecException e) {
+                    throw new InvalidKeyException(e);
+                }
                 return implTranslatePrivateKey(key);
             } else {
                 throw new InvalidKeyException("PrivateKey must be instance "
@@ -106,14 +120,14 @@ final class P11DSAKeyFactory extends P11KeyFactory {
         if (keySpec instanceof X509EncodedKeySpec) {
             try {
                 byte[] encoded = ((X509EncodedKeySpec)keySpec).getEncoded();
-                PublicKey key = new sun.security.provider.DSAPublicKey(encoded);
+                PublicKey key = sunDsaKeyFactory().generatePublic(new X509EncodedKeySpec(encoded));
                 return implTranslatePublicKey(key);
             } catch (InvalidKeyException e) {
                 throw new InvalidKeySpecException
                         ("Could not create DSA public key", e);
             }
         }
-        if (keySpec instanceof DSAPublicKeySpec == false) {
+        if (!(keySpec instanceof DSAPublicKeySpec)) {
             throw new InvalidKeySpecException("Only DSAPublicKeySpec and "
                 + "X509EncodedKeySpec supported for DSA public keys");
         }
@@ -138,14 +152,14 @@ final class P11DSAKeyFactory extends P11KeyFactory {
         if (keySpec instanceof PKCS8EncodedKeySpec) {
             try {
                 byte[] encoded = ((PKCS8EncodedKeySpec)keySpec).getEncoded();
-                PrivateKey key = new sun.security.provider.DSAPrivateKey(encoded);
+                PrivateKey key = sunDsaKeyFactory().generatePrivate(new PKCS8EncodedKeySpec(encoded));
                 return implTranslatePrivateKey(key);
             } catch (GeneralSecurityException e) {
                 throw new InvalidKeySpecException
                         ("Could not create DSA private key", e);
             }
         }
-        if (keySpec instanceof DSAPrivateKeySpec == false) {
+        if (!(keySpec instanceof DSAPrivateKeySpec)) {
             throw new InvalidKeySpecException("Only DSAPrivateKeySpec and "
                 + "PKCS8EncodedKeySpec supported for DSA private keys");
         }
@@ -211,7 +225,7 @@ final class P11DSAKeyFactory extends P11KeyFactory {
 
     <T extends KeySpec> T implGetPublicKeySpec(P11Key key, Class<T> keySpec,
             Session[] session) throws PKCS11Exception, InvalidKeySpecException {
-        if (DSAPublicKeySpec.class.isAssignableFrom(keySpec)) {
+        if (keySpec.isAssignableFrom(DSAPublicKeySpec.class)) {
             session[0] = token.getObjSession();
             CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
                 new CK_ATTRIBUTE(CKA_VALUE),
@@ -240,7 +254,7 @@ final class P11DSAKeyFactory extends P11KeyFactory {
 
     <T extends KeySpec> T implGetPrivateKeySpec(P11Key key, Class<T> keySpec,
             Session[] session) throws PKCS11Exception, InvalidKeySpecException {
-        if (DSAPrivateKeySpec.class.isAssignableFrom(keySpec)) {
+        if (keySpec.isAssignableFrom(DSAPrivateKeySpec.class)) {
             session[0] = token.getObjSession();
             CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
                 new CK_ATTRIBUTE(CKA_VALUE),
