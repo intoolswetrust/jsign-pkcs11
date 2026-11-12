@@ -346,6 +346,18 @@ final class P11Signature extends SignatureSpi {
         }
     }
 
+    // CKU_CONTEXT_SPECIFIC login right after C_SignInit; see JSignPKCS11.contextSpecificLogin
+    private void contextSpecificLogin(long keyID) {
+        try {
+            token.provider.contextSpecificLogin(session, p11Key, keyID);
+        } catch (ProviderException e) {
+            // the sign operation is still active in the session
+            p11Key.releaseKeyID();
+            session = token.killSession(session);
+            throw e;
+        }
+    }
+
     // assumes current state is initialized == false
     private void initialize() {
 
@@ -371,6 +383,9 @@ final class P11Signature extends SignatureSpi {
             p11Key.releaseKeyID();
             session = token.releaseSession(session);
             throw new ProviderException("Initialization failed", e);
+        }
+        if (mode == M_SIGN) {
+            contextSpecificLogin(keyID);
         }
         if (bytesProcessed != 0) {
             bytesProcessed = 0;

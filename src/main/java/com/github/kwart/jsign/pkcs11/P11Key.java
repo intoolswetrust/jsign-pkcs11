@@ -97,6 +97,12 @@ abstract class P11Key implements Key, Length {
     @SuppressWarnings("serial") // Type of field is not Serializable
     private final NativeKeyHolder keyIDHolder;
 
+    // key password (QPIN) for the CKU_CONTEXT_SPECIFIC login, set by P11KeyStore
+    private transient volatile char[] contextPin;
+
+    // CKA_ALWAYS_AUTHENTICATE value, null until read from the token
+    private transient volatile Boolean alwaysAuthenticate;
+
     private static final boolean DISABLE_NATIVE_KEYS_EXTRACTION;
 
     /**
@@ -150,6 +156,43 @@ abstract class P11Key implements Key, Length {
 
     public long getKeyID() {
         return keyIDHolder.getKeyID();
+    }
+
+    void setContextPin(char[] pin) {
+        contextPin = pin.clone();
+    }
+
+    /**
+     * Returns a copy of the key password (QPIN), or null if none was given.
+     */
+    char[] getContextPin() {
+        char[] pin = contextPin;
+        return pin == null ? null : pin.clone();
+    }
+
+    /**
+     * Returns the CKA_ALWAYS_AUTHENTICATE attribute of a private key. Tokens
+     * which don't know the attribute (pre PKCS#11 v2.20) don't require the
+     * context specific login, so read failures count as false.
+     */
+    boolean isAlwaysAuthenticate(Session session, long keyID) {
+        Boolean value = alwaysAuthenticate;
+        if (value == null) {
+            value = Boolean.FALSE;
+            if (PRIVATE.equals(type)) {
+                CK_ATTRIBUTE[] attrs = { new CK_ATTRIBUTE(CKA_ALWAYS_AUTHENTICATE) };
+                try {
+                    token.p11.C_GetAttributeValue(session.id(), keyID, attrs);
+                    value = attrs[0].getBoolean();
+                } catch (PKCS11Exception | RuntimeException e) {
+                    if (JSignPKCS11.debug != null) {
+                        JSignPKCS11.debug.println("Unable to read CKA_ALWAYS_AUTHENTICATE: " + e);
+                    }
+                }
+            }
+            alwaysAuthenticate = value;
+        }
+        return value;
     }
 
     public void releaseKeyID() {

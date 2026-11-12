@@ -69,7 +69,6 @@ import sun.security.util.Debug;
 import sun.security.util.DerValue;
 import sun.security.util.ECUtil;
 
-import com.github.kwart.jsign.pkcs11.Secmod.*;
 import static com.github.kwart.jsign.pkcs11.P11Util.*;
 
 import sun.security.pkcs11.wrapper.*;
@@ -123,12 +122,6 @@ final class P11KeyStore extends KeyStoreSpi {
 
     // Map of unique keystore aliases to entries in the token
     private HashMap<String, AliasInfo> aliasMap;
-
-    // whether to use NSS Secmod info for trust attributes
-    private final boolean useSecmodTrust;
-
-    // if useSecmodTrust == true, which type of trust we are interested in
-    private Secmod.TrustType nssTrustType;
 
     /**
      * The underlying token may contain multiple certs belonging to the
@@ -268,9 +261,19 @@ final class P11KeyStore extends KeyStoreSpi {
         }
     }
 
+    /**
+     * Remembers the key password (QPIN) in the loaded key. It's used for the
+     * CKU_CONTEXT_SPECIFIC login when the key has CKA_ALWAYS_AUTHENTICATE set.
+     */
+    private static PrivateKey withKeyPin(PrivateKey pkey, char[] password) {
+        if (pkey instanceof P11Key p11Key && password != null) {
+            p11Key.setContextPin(password);
+        }
+        return pkey;
+    }
+
     P11KeyStore(Token token) {
         this.token = token;
-        this.useSecmodTrust = token.provider.nssUseSecmodTrust;
     }
 
     /**
@@ -313,7 +316,7 @@ final class P11KeyStore extends KeyStoreSpi {
                                         aliasInfo.id,
                                         null);
                 if (h.type == ATTR_CLASS_PKEY) {
-                    return loadPkey(session, h.handle);
+                    return withKeyPin(loadPkey(session, h.handle), password);
                 }
             } else {
                 THandle h = getTokenObject(session,
@@ -754,10 +757,6 @@ final class P11KeyStore extends KeyStoreSpi {
             throw new IOException("input stream must be null");
         }
 
-        if (useSecmodTrust) {
-            nssTrustType = Secmod.TrustType.ALL;
-        }
-
         try {
             if (password == null) {
                 login(null);
@@ -834,14 +833,6 @@ final class P11KeyStore extends KeyStoreSpi {
             throw new IllegalArgumentException
                         ("invalid null LoadStoreParameter");
         }
-        if (useSecmodTrust) {
-            if (param instanceof Secmod.KeyStoreLoadParameter) {
-                nssTrustType = ((Secmod.KeyStoreLoadParameter)param).getTrustType();
-            } else {
-                nssTrustType = Secmod.TrustType.ALL;
-            }
-        }
-
         CallbackHandler handler;
         KeyStore.ProtectionParameter pp = param.getProtectionParameter();
         if (pp instanceof PasswordProtection) {
@@ -915,8 +906,9 @@ final class P11KeyStore extends KeyStoreSpi {
 
         token.ensureValid();
 
-        if (protParam instanceof PasswordProtection pp &&
-            pp.getPassword() != null &&
+        char[] password = (protParam instanceof PasswordProtection pp)
+                ? pp.getPassword() : null;
+        if (password != null &&
             !token.config.getKeyStoreCompatibilityMode()) {
             throw new KeyStoreException("ProtectionParameter must be null");
         }
@@ -968,7 +960,7 @@ final class P11KeyStore extends KeyStoreSpi {
                     throw new KeyStoreException
                         ("expected but could not find private key");
                 } else {
-                    PrivateKey pkey = loadPkey(session, h.handle);
+                    PrivateKey pkey = withKeyPin(loadPkey(session, h.handle), password);
                     Certificate[] chain = aliasInfo.chain;
                     if ((pkey != null) && (chain != null)) {
                         return new KeyStore.PrivateKeyEntry(pkey, chain);
@@ -1030,34 +1022,10 @@ final class P11KeyStore extends KeyStoreSpi {
 
         if (entry instanceof KeyStore.TrustedCertificateEntry) {
 
-            if (!useSecmodTrust) {
-                // PKCS #11 does not allow app to modify trusted certs -
-                throw new KeyStoreException(new UnsupportedOperationException
-                                    ("trusted certificates may only be set by " +
-                                    "token initialization application"));
-            }
-            Secmod.Module module = token.provider.nssModule;
-            if ((module.type != ModuleType.KEYSTORE) && (module.type != ModuleType.FIPS)) {
-                // XXX allow TRUSTANCHOR module
-                throw new KeyStoreException("Trusted certificates can only be "
-                    + "added to the NSS KeyStore module");
-            }
-            Certificate cert = ((TrustedCertificateEntry)entry).getTrustedCertificate();
-            if (!(cert instanceof X509Certificate xcert)) {
-                throw new KeyStoreException("Certificate must be an X509Certificate");
-            }
-            AliasInfo info = aliasMap.get(alias);
-            if (info != null) {
-                // XXX try to update
-                deleteEntry(alias);
-            }
-            try {
-                storeCert(alias, xcert);
-                module.setTrust(token, xcert);
-                mapLabels();
-            } catch (PKCS11Exception | CertificateException e) {
-                throw new KeyStoreException(e);
-            }
+            // PKCS #11 does not allow app to modify trusted certs -
+            throw new KeyStoreException(new UnsupportedOperationException
+                                ("trusted certificates may only be set by " +
+                                "token initialization application"));
 
         } else {
 
@@ -2386,22 +2354,18 @@ final class P11KeyStore extends KeyStoreSpi {
 
                 boolean cka_trusted = false;
 
-                if (useSecmodTrust) {
-                    cka_trusted = Secmod.getInstance().isTrusted(cert, nssTrustType);
-                } else {
-                    if (CKA_TRUSTED_SUPPORTED) {
-                        try {
-                            token.p11.C_GetAttributeValue
-                                    (session.id(), handle, trustedAttr);
-                            cka_trusted = trustedAttr[0].getBoolean();
-                        } catch (PKCS11Exception pe) {
-                            if (pe.match(CKR_ATTRIBUTE_TYPE_INVALID)) {
-                                // XXX  NSS, ibutton, sca1000
-                                CKA_TRUSTED_SUPPORTED = false;
-                                if (debug != null) {
-                                    debug.println
-                                            ("CKA_TRUSTED attribute not supported");
-                                }
+                if (CKA_TRUSTED_SUPPORTED) {
+                    try {
+                        token.p11.C_GetAttributeValue
+                                (session.id(), handle, trustedAttr);
+                        cka_trusted = trustedAttr[0].getBoolean();
+                    } catch (PKCS11Exception pe) {
+                        if (pe.match(CKR_ATTRIBUTE_TYPE_INVALID)) {
+                            // XXX  NSS, ibutton, sca1000
+                            CKA_TRUSTED_SUPPORTED = false;
+                            if (debug != null) {
+                                debug.println
+                                        ("CKA_TRUSTED attribute not supported");
                             }
                         }
                     }

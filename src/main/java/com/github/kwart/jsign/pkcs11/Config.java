@@ -134,6 +134,26 @@ final class Config {
     // be more tolerant of input parameters
     private boolean keyStoreCompatibilityMode = true;
 
+    /**
+     * When to do the CKU_CONTEXT_SPECIFIC login before signing.
+     */
+    enum ContextLogin {
+        /**
+         * Only for keys with CKA_ALWAYS_AUTHENTICATE=true (default).
+         */
+        AUTO,
+        /**
+         * For every key with a key password; errors are ignored unless the key requires the login.
+         */
+        ALWAYS,
+        /**
+         * Never.
+         */
+        NEVER
+    }
+
+    private ContextLogin contextSpecificLogin = ContextLogin.AUTO;
+
     // flag indicating whether we need to explicitly cancel operations
     // see Token
     private boolean explicitCancel = true;
@@ -176,8 +196,6 @@ final class Config {
 
     // which NSS module to use
     private String nssModule;
-
-    private Secmod.DbMode nssDbMode = Secmod.DbMode.READ_WRITE;
 
     // Whether the P11KeyStore should specify the CKA_NETSCAPE_DB attribute
     // when creating private keys. Only valid if nssUseSecmod is true.
@@ -279,6 +297,10 @@ final class Config {
         return handleStartupErrors;
     }
 
+    ContextLogin getContextSpecificLogin() {
+        return contextSpecificLogin;
+    }
+
     boolean getKeyStoreCompatibilityMode() {
         return keyStoreCompatibilityMode;
     }
@@ -335,10 +357,6 @@ final class Config {
 
     String getNssModule() {
         return nssModule;
-    }
-
-    Secmod.DbMode getNssDbMode() {
-        return nssDbMode;
     }
 
     public boolean getNssNetscapeDbWorkaround() {
@@ -462,6 +480,15 @@ final class Config {
                 showInfo = parseBooleanEntry(st.sval);
             case "allowLegacy"->
                 allowLegacy = parseBooleanEntry(st.sval);
+            case "contextSpecificLogin"-> {
+                String mode = parseStringEntry(st.sval);
+                contextSpecificLogin = switch (mode) {
+                    case "auto" -> ContextLogin.AUTO;
+                    case "always" -> ContextLogin.ALWAYS;
+                    case "never" -> ContextLogin.NEVER;
+                    default -> throw excToken("contextSpecificLogin must be one of auto, always, and never:");
+                };
+            }
             case "keyStoreCompatibilityMode"->
                 keyStoreCompatibilityMode = parseBooleanEntry(st.sval);
             case "explicitCancel"->
@@ -487,13 +514,11 @@ final class Config {
                 nssUseSecmod = true;
             }
             case "nssDbMode"-> {
+                // NSS mode is rejected in JSignPKCS11 constructor; the value is only validated here
                 String mode = parseStringEntry(st.sval);
-                nssDbMode = switch (mode) {
-                    case "readWrite" -> Secmod.DbMode.READ_WRITE;
-                    case "readOnly" -> Secmod.DbMode.READ_ONLY;
-                    case "noDb" -> Secmod.DbMode.NO_DB;
-                    default -> throw excToken("nssDbMode must be one of readWrite, readOnly, and noDb:");
-                };
+                if (!List.of("readWrite", "readOnly", "noDb").contains(mode)) {
+                    throw excToken("nssDbMode must be one of readWrite, readOnly, and noDb:");
+                }
                 nssUseSecmod = true;
             }
             case "nssNetscapeDbWorkaround"-> {

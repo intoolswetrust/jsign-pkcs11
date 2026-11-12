@@ -48,8 +48,6 @@ import sun.security.util.ResourcesMgr;
 import static sun.security.util.SecurityConstants.PROVIDER_VER;
 import static sun.security.util.SecurityProviderConstants.getAliases;
 
-import com.github.kwart.jsign.pkcs11.Secmod.*;
-
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
@@ -61,6 +59,12 @@ import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
  * @since   1.5
  */
 public final class JSignPKCS11 extends AuthProvider {
+
+    /**
+     * PKCS#11 user type for the login authorizing a single operation with a key
+     * having {@code CKA_ALWAYS_AUTHENTICATE=true}. Not defined in the JDK wrapper.
+     */
+    public static final long CKU_CONTEXT_SPECIFIC = 2L;
 
     @Serial
     private static final long serialVersionUID = -1354835039035306505L;
@@ -85,11 +89,6 @@ public final class JSignPKCS11 extends AuthProvider {
 
     final boolean removable;
 
-    @SuppressWarnings("serial") // Type of field is not Serializable
-    final Secmod.Module nssModule;
-
-    final boolean nssUseSecmodTrust;
-
     private volatile Token token;
 
     @SuppressWarnings("serial") // Type of field is not Serializable
@@ -109,10 +108,41 @@ public final class JSignPKCS11 extends AuthProvider {
         slotID = 0;
         pHandler = null;
         removable = false;
-        nssModule = null;
-        nssUseSecmodTrust = false;
         token = null;
         poller = null;
+    }
+
+    /**
+     * Creates a configured provider.
+     *
+     * @param configArg path to the configuration file, or the configuration
+     *        itself prefixed with {@code "--"} (same as {@link #configure(String)})
+     */
+    public JSignPKCS11(String configArg) {
+        this(newConfig(checkNull(configArg)));
+    }
+
+    /**
+     * Creates a configured provider reading the configuration from the given stream.
+     */
+    public JSignPKCS11(InputStream configStream) {
+        this(newConfig("--" + readConfig(checkNull(configStream))));
+    }
+
+    private static String readConfig(InputStream configStream) {
+        try {
+            return new String(configStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new ProviderException("Error reading JSignPKCS11 configuration", e);
+        }
+    }
+
+    private static Config newConfig(String configArg) {
+        try {
+            return new Config(configArg);
+        } catch (IOException e) {
+            throw new InvalidParameterException("Error configuring JSignPKCS11 provider", e);
+        }
     }
 
     @SuppressWarnings("removal")
@@ -143,7 +173,6 @@ public final class JSignPKCS11 extends AuthProvider {
         return obj;
     }
 
-    // Used by Secmod
     JSignPKCS11(Config c) {
         super("JSignPKCS11-" + c.getName(), PROVIDER_VER, c.getDescription());
         this.config = c;
@@ -157,145 +186,10 @@ public final class JSignPKCS11 extends AuthProvider {
         long slotID = config.getSlotID();
         int slotListIndex = config.getSlotListIndex();
 
-        boolean useSecmod = config.getNssUseSecmod();
-        boolean nssUseSecmodTrust = config.getNssUseSecmodTrust();
-        Secmod.Module nssModule = null;
-
-        //
-        // Initialization via Secmod. The way this works is as follows:
-        // JSignPKCS11 is either in normal mode or in NSS Secmod mode.
-        // Secmod is activated by specifying one or more of the following
-        // options in the config file:
-        // nssUseSecmod, nssSecmodDirectory, nssLibrary, nssModule
-        //
-        // XXX add more explanation here
-        //
-        // If we are in Secmod mode and configured to use either the
-        // nssKeyStore or the nssTrustAnchors module, we automatically
-        // switch to using the NSS trust attributes for trusted certs
-        // (KeyStore).
-        //
-        if (useSecmod) {
-            // note: Config ensures library/slot/slotListIndex not specified
-            // in secmod mode.
-            Secmod secmod = Secmod.getInstance();
-            DbMode nssDbMode = config.getNssDbMode();
-            try {
-                String nssLibraryDirectory = config.getNssLibraryDirectory();
-                String nssSecmodDirectory = config.getNssSecmodDirectory();
-                boolean nssOptimizeSpace = config.getNssOptimizeSpace();
-
-                if (secmod.isInitialized()) {
-                    if (nssSecmodDirectory != null) {
-                        String s = secmod.getConfigDir();
-                        if ((s != null) &&
-                                (!s.equals(nssSecmodDirectory))) {
-                            throw new ProviderException("Secmod directory "
-                                + nssSecmodDirectory
-                                + " invalid, NSS already initialized with "
-                                + s);
-                        }
-                    }
-                    if (nssLibraryDirectory != null) {
-                        String s = secmod.getLibDir();
-                        if ((s != null) &&
-                                (!s.equals(nssLibraryDirectory))) {
-                            throw new ProviderException("NSS library directory "
-                                + nssLibraryDirectory
-                                + " invalid, NSS already initialized with "
-                                + s);
-                        }
-                    }
-                } else {
-                    if (nssDbMode != DbMode.NO_DB) {
-                        if (nssSecmodDirectory == null) {
-                            throw new ProviderException(
-                                "Secmod not initialized and "
-                                 + "nssSecmodDirectory not specified");
-                        }
-                    } else {
-                        if (nssSecmodDirectory != null) {
-                            throw new ProviderException(
-                                "nssSecmodDirectory must not be "
-                                + "specified in noDb mode");
-                        }
-                    }
-                    secmod.initialize(nssDbMode, nssSecmodDirectory,
-                        nssLibraryDirectory, nssOptimizeSpace);
-                }
-            } catch (IOException e) {
-                // XXX which exception to throw
-                throw new ProviderException("Could not initialize NSS", e);
-            }
-            List<Secmod.Module> modules = secmod.getModules();
-            if (config.getShowInfo()) {
-                System.out.println("NSS modules: " + modules);
-            }
-
-            String moduleName = config.getNssModule();
-            if (moduleName == null) {
-                nssModule = secmod.getModule(ModuleType.FIPS);
-                if (nssModule != null) {
-                    moduleName = "fips";
-                } else {
-                    moduleName = (nssDbMode == DbMode.NO_DB) ?
-                        "crypto" : "keystore";
-                }
-            }
-            if (moduleName.equals("fips")) {
-                nssModule = secmod.getModule(ModuleType.FIPS);
-                nssUseSecmodTrust = true;
-                functionList = "FC_GetFunctionList";
-            } else if (moduleName.equals("keystore")) {
-                nssModule = secmod.getModule(ModuleType.KEYSTORE);
-                nssUseSecmodTrust = true;
-            } else if (moduleName.equals("crypto")) {
-                nssModule = secmod.getModule(ModuleType.CRYPTO);
-            } else if (moduleName.equals("trustanchors")) {
-                // XXX should the option be called trustanchor or trustanchors??
-                nssModule = secmod.getModule(ModuleType.TRUSTANCHOR);
-                nssUseSecmodTrust = true;
-            } else if (moduleName.startsWith("external-")) {
-                int moduleIndex;
-                try {
-                    moduleIndex = Integer.parseInt
-                            (moduleName.substring("external-".length()));
-                } catch (NumberFormatException e) {
-                    moduleIndex = -1;
-                }
-                if (moduleIndex < 1) {
-                    throw new ProviderException
-                            ("Invalid external module: " + moduleName);
-                }
-                int k = 0;
-                for (Secmod.Module module : modules) {
-                    if (module.getType() == ModuleType.EXTERNAL) {
-                        if (++k == moduleIndex) {
-                            nssModule = module;
-                            break;
-                        }
-                    }
-                }
-                if (nssModule == null) {
-                    throw new ProviderException("Invalid module " + moduleName
-                        + ": only " + k + " external NSS modules available");
-                }
-            } else {
-                throw new ProviderException(
-                    "Unknown NSS module: " + moduleName);
-            }
-            if (nssModule == null) {
-                throw new ProviderException(
-                    "NSS module not available: " + moduleName);
-            }
-            if (nssModule.hasInitializedProvider()) {
-                throw new ProviderException("Secmod module already configured");
-            }
-            library = nssModule.libraryName;
-            slotListIndex = nssModule.slot;
+        if (config.getNssUseSecmod()) {
+            // Secmod depends on JDK native code bound to the sun.security.pkcs11 package
+            throw new ProviderException("The JSignPKCS11 provider doesn't support the NSS mode");
         }
-        this.nssUseSecmodTrust = nssUseSecmodTrust;
-        this.nssModule = nssModule;
 
         File libraryFile = new File(library);
         // if the filename is a simple filename without path
@@ -380,9 +274,6 @@ public final class JSignPKCS11 extends AuthProvider {
             CK_SLOT_INFO slotInfo = p11.C_GetSlotInfo(slotID);
             removable = (slotInfo.flags & CKF_REMOVABLE_DEVICE) != 0;
             initToken(slotInfo);
-            if (nssModule != null) {
-                nssModule.setProvider(this);
-            }
         } catch (Exception e) {
             if (config.getHandleStartupErrors() == Config.ERR_IGNORE_ALL) {
                 throw new UnsupportedOperationException
@@ -1355,14 +1246,14 @@ public final class JSignPKCS11 extends AuthProvider {
                     // not support many sessions. if we did, we might
                     // run out of sessions in the middle of a
                     // nextBytes() call where we cannot fail over.
-                    putService(new P11Service(token, SR, "PKCS11",
+                    putService(new P11Service(token, SR, "JSIGNPKCS11",
                         "com.github.kwart.jsign.pkcs11.P11SecureRandom", null,
                         PCKM_SECURERANDOM));
                 }
                 if (config.isEnabled(PCKM_KEYSTORE)) {
-                    putService(new P11Service(token, KS, "PKCS11",
+                    putService(new P11Service(token, KS, "JSIGNPKCS11",
                         "com.github.kwart.jsign.pkcs11.P11KeyStore",
-                        List.of("PKCS11-" + config.getName()),
+                        List.of("JSIGNPKCS11-" + config.getName()),
                         PCKM_KEYSTORE));
                 }
                 return null;
@@ -1695,6 +1586,61 @@ public final class JSignPKCS11 extends AuthProvider {
         }
 
         // we do not store the PIN in the subject for now
+    }
+
+    /**
+     * Performs the {@code CKU_CONTEXT_SPECIFIC} login which keys with
+     * {@code CKA_ALWAYS_AUTHENTICATE=true} (e.g. qualified signature keys) require
+     * for each use. It has to be called right after the operation was initialized
+     * ({@code C_SignInit}) and before any data is passed to the token.
+     * The key password (QPIN) is the one given to {@code KeyStore.getKey()}.
+     * <p>
+     * If the login fails, the operation stays active in the session. The caller
+     * has to kill the session.
+     *
+     * @throws ProviderException if the login is required and fails
+     */
+    void contextSpecificLogin(Session session, P11Key key, long keyID) {
+        Config.ContextLogin mode = config.getContextSpecificLogin();
+        if (mode == Config.ContextLogin.NEVER) {
+            return;
+        }
+        boolean required = key.isAlwaysAuthenticate(session, keyID);
+        if (mode == Config.ContextLogin.AUTO && !required) {
+            return;
+        }
+        char[] pin = key.getContextPin();
+        if (pin == null && (token.tokenInfo.flags & CKF_PROTECTED_AUTHENTICATION_PATH) == 0) {
+            if (!required) {
+                return;
+            }
+            throw new ProviderException("The key requires a context specific "
+                    + "login (CKA_ALWAYS_AUTHENTICATE), but no key password was "
+                    + "provided in KeyStore.getKey()");
+        }
+        try {
+            // pin is null if using CKF_PROTECTED_AUTHENTICATION_PATH
+            p11.C_Login(session.id(), CKU_CONTEXT_SPECIFIC, pin);
+            if (debug != null) {
+                debug.println("context specific login succeeded");
+            }
+        } catch (PKCS11Exception pe) {
+            if (!required) {
+                // ContextLogin.ALWAYS on a key which doesn't need the login
+                if (debug != null) {
+                    debug.println("context specific login ignored: " + pe);
+                }
+                return;
+            }
+            String msg = pe.match(CKR_PIN_INCORRECT)
+                    ? "Context specific login failed: incorrect key password"
+                    : "Context specific login failed";
+            throw new ProviderException(msg, pe);
+        } finally {
+            if (pin != null) {
+                Arrays.fill(pin, ' ');
+            }
+        }
     }
 
     /**
