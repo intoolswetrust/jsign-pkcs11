@@ -7,14 +7,35 @@
     <packaging>jar</packaging>
 
     <name>${project.artifactId}</name>
-    <description>Tweaked port of SunPKCS11 security provider</description>
+    <description>Tweaked port of SunPKCS11 security provider (OpenJDK 21)</description>
     <url>https://github.com/kwart/jsign-pkcs11</url>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>${maven.compiler.source}</maven.compiler.target>
+        <!--
+          maven.compiler.release can't be used: javac refuses to export packages of
+          system modules (sun.security.pkcs11.wrapper) when compiling with release.
+        -->
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <!--
+          The only JDK internal package used by the provider. Applications using the
+          provider have to pass this flag to the JVM; tests run with exactly this set.
+        -->
+        <jsign.jvm.access>--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11.wrapper=ALL-UNNAMED</jsign.jvm.access>
+        <!-- CI sets this to true so that a missing SoftHSM2 fails the build instead of skipping tests. -->
+        <softhsm.required>false</softhsm.required>
+        <junit.version>5.11.4</junit.version>
     </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 
     <build>
         <plugins>
@@ -28,16 +49,43 @@
                         <goals>
                             <goal>enforce</goal>
                         </goals>
-                        <phase>compile</phase>
+                        <phase>validate</phase>
                         <configuration>
                             <rules>
                                 <requireJavaVersion>
-                                    <version>[1.8,1.9)</version>
+                                    <version>[21,)</version>
                                 </requireJavaVersion>
                             </rules>
                         </configuration>
                     </execution>
                 </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <compilerArgs>
+                        <arg>--add-modules=jdk.crypto.cryptoki</arg>
+                        <arg>--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11.wrapper=ALL-UNNAMED</arg>
+                        <arg>-Xlint:all,-serial,-removal,-deprecation,-options</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <argLine>${jsign.jvm.access}</argLine>
+                    <environmentVariables>
+                        <SOFTHSM2_CONF>${project.build.directory}/softhsm/softhsm2.conf</SOFTHSM2_CONF>
+                    </environmentVariables>
+                    <systemPropertyVariables>
+                        <softhsm.required>${softhsm.required}</softhsm.required>
+                        <jsign.jvm.access>${jsign.jvm.access}</jsign.jvm.access>
+                    </systemPropertyVariables>
+                </configuration>
             </plugin>
         </plugins>
     </build>
@@ -116,6 +164,10 @@
                         </executions>
                         <configuration>
                             <doclint>none</doclint>
+                            <additionalOptions>
+                                <additionalOption>--add-modules=jdk.crypto.cryptoki</additionalOption>
+                                <additionalOption>--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11.wrapper=ALL-UNNAMED</additionalOption>
+                            </additionalOptions>
                         </configuration>
                     </plugin>
                     <plugin>
