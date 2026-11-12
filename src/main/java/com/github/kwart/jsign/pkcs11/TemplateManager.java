@@ -40,28 +40,28 @@ import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
  * attribute is not specified at all.
  *
  * In order to allow an application to work unmodified with all those
- * different tokens, the SunPKCS11 provider makes the attributes that are
- * specified and their value configurable. Hence, only the SunPKCS11
+ * different tokens, the JSignPKCS11 provider makes the attributes that are
+ * specified and their value configurable. Hence, only the JSignPKCS11
  * configuration file has to be tweaked at deployment time to allow all
  * existing applications to be used.
  *
  * The template manager is responsible for reading the attribute configuration
  * information and to make it available to the various internal components
- * of the SunPKCS11 provider.
+ * of the JSignPKCS11 provider.
  *
  * @author  Andreas Sterbenz
  * @since   1.5
  */
 final class TemplateManager {
 
-    private final static boolean DEBUG = false;
+    private static final boolean DEBUG = false;
 
     // constant for any operation (either O_IMPORT or O_GENERATE)
-    final static String O_ANY      = "*";
+    static final String O_ANY      = "*";
     // constant for operation create ("importing" existing key material)
-    final static String O_IMPORT   = "import";
+    static final String O_IMPORT   = "import";
     // constant for operation generate (generating new key material)
-    final static String O_GENERATE = "generate";
+    static final String O_GENERATE = "generate";
 
     private static class KeyAndTemplate {
         final TemplateKey key;
@@ -85,8 +85,8 @@ final class TemplateManager {
     private final Map<TemplateKey,Template> compositeTemplates;
 
     TemplateManager() {
-        primitiveTemplates = new ArrayList<KeyAndTemplate>();
-        compositeTemplates = new ConcurrentHashMap<TemplateKey,Template>();
+        primitiveTemplates = new ArrayList<>();
+        compositeTemplates = new ConcurrentHashMap<>();
     }
 
     // add a template. Called by Config.
@@ -151,10 +151,9 @@ final class TemplateManager {
             if (this == obj) {
                 return true;
             }
-            if (obj instanceof TemplateKey == false) {
+            if (!(obj instanceof TemplateKey other)) {
                 return false;
             }
-            TemplateKey other = (TemplateKey)obj;
             boolean match = this.operation.equals(other.operation)
                         && (this.keyType == other.keyType)
                         && (this.keyAlgorithm == other.keyAlgorithm);
@@ -186,7 +185,7 @@ final class TemplateManager {
      */
     private static final class Template {
 
-        private final static CK_ATTRIBUTE[] A0 = new CK_ATTRIBUTE[0];
+        private static final CK_ATTRIBUTE[] A0 = new CK_ATTRIBUTE[0];
 
         private CK_ATTRIBUTE[] attributes;
 
@@ -212,7 +211,7 @@ final class TemplateManager {
          */
         private static CK_ATTRIBUTE[] combine(CK_ATTRIBUTE[] attrs1,
                 CK_ATTRIBUTE[] attrs2) {
-            List<CK_ATTRIBUTE> attrs = new ArrayList<CK_ATTRIBUTE>();
+            List<CK_ATTRIBUTE> attrs = new ArrayList<>();
             for (CK_ATTRIBUTE attr : attrs1) {
                 if (attr.pValue != null) {
                     attrs.add(attr);

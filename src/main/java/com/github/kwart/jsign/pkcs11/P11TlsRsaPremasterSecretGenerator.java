@@ -32,9 +32,9 @@ import javax.crypto.*;
 import javax.crypto.spec.*;
 
 import sun.security.internal.spec.TlsRsaPremasterSecretParameterSpec;
-import sun.security.pkcs11.wrapper.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
+import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
 /**
@@ -45,7 +45,7 @@ import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
  */
 final class P11TlsRsaPremasterSecretGenerator extends KeyGeneratorSpi {
 
-    private final static String MSG = "TlsRsaPremasterSecretGenerator must be "
+    private static final String MSG = "TlsRsaPremasterSecretGenerator must be "
         + "initialized using a TlsRsaPremasterSecretParameterSpec";
 
     // token instance
@@ -55,11 +55,13 @@ final class P11TlsRsaPremasterSecretGenerator extends KeyGeneratorSpi {
     private final String algorithm;
 
     // mechanism id
-    private long mechanism;
+    private final long mechanism;
 
-    private int version;
-
+    @SuppressWarnings("deprecation")
     private TlsRsaPremasterSecretParameterSpec spec;
+
+    // whether SSLv3 is supported
+    private final boolean supportSSLv3;
 
     P11TlsRsaPremasterSecretGenerator(Token token, String algorithm, long mechanism)
             throws PKCS11Exception {
@@ -67,23 +69,34 @@ final class P11TlsRsaPremasterSecretGenerator extends KeyGeneratorSpi {
         this.token = token;
         this.algorithm = algorithm;
         this.mechanism = mechanism;
+
+        // Given the current lookup order specified in JSignPKCS11.java,
+        // if CKM_SSL3_PRE_MASTER_KEY_GEN is not used to construct this object,
+        // it means that this mech is disabled or unsupported.
+        this.supportSSLv3 = (mechanism == CKM_SSL3_PRE_MASTER_KEY_GEN);
     }
 
     protected void engineInit(SecureRandom random) {
         throw new InvalidParameterException(MSG);
     }
 
+    @SuppressWarnings("deprecation")
     protected void engineInit(AlgorithmParameterSpec params,
             SecureRandom random) throws InvalidAlgorithmParameterException {
-        if (!(params instanceof TlsRsaPremasterSecretParameterSpec)) {
+        if (!(params instanceof TlsRsaPremasterSecretParameterSpec spec)) {
             throw new InvalidAlgorithmParameterException(MSG);
         }
-        this.spec = (TlsRsaPremasterSecretParameterSpec)params;
-        version = (spec.getMajorVersion() << 8) | spec.getMinorVersion();
-        if ((version < 0x0300) && (version > 0x0303)) {
-            throw new InvalidAlgorithmParameterException
-                ("Only SSL 3.0, TLS 1.0, TLS 1.1, and TLS 1.2 are supported");
+
+        int tlsVersion = (spec.getMajorVersion() << 8) | spec.getMinorVersion();
+
+        if ((tlsVersion == 0x0300 && !supportSSLv3) ||
+                (tlsVersion < 0x0300) || (tlsVersion > 0x0303)) {
+             throw new InvalidAlgorithmParameterException
+                    ("Only" + (supportSSLv3? " SSL 3.0,": "") +
+                     " TLS 1.0, TLS 1.1 and TLS 1.2 are supported (" +
+                     tlsVersion + ")");
         }
+        this.spec = spec;
     }
 
     protected void engineInit(int keysize, SecureRandom random) {

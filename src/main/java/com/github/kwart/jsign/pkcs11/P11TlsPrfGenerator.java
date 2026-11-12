@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,10 +31,12 @@ import java.security.spec.AlgorithmParameterSpec;
 import javax.crypto.*;
 import javax.crypto.spec.*;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import sun.security.internal.spec.TlsPrfParameterSpec;
-import sun.security.pkcs11.wrapper.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
+import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
 /**
@@ -51,7 +53,7 @@ import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
  */
 final class P11TlsPrfGenerator extends KeyGeneratorSpi {
 
-    private final static String MSG =
+    private static final String MSG =
             "TlsPrfGenerator must be initialized using a TlsPrfParameterSpec";
 
     // token instance
@@ -63,6 +65,7 @@ final class P11TlsPrfGenerator extends KeyGeneratorSpi {
     // mechanism id
     private final long mechanism;
 
+    @SuppressWarnings("deprecation")
     private TlsPrfParameterSpec spec;
 
     private P11Key p11Key;
@@ -79,9 +82,10 @@ final class P11TlsPrfGenerator extends KeyGeneratorSpi {
         throw new InvalidParameterException(MSG);
     }
 
+    @SuppressWarnings("deprecation")
     protected void engineInit(AlgorithmParameterSpec params,
             SecureRandom random) throws InvalidAlgorithmParameterException {
-        if (params instanceof TlsPrfParameterSpec == false) {
+        if (!(params instanceof TlsPrfParameterSpec)) {
             throw new InvalidAlgorithmParameterException(MSG);
         }
         this.spec = (TlsPrfParameterSpec)params;
@@ -124,6 +128,7 @@ final class P11TlsPrfGenerator extends KeyGeneratorSpi {
         if (spec == null) {
             throw new IllegalStateException("TlsPrfGenerator must be initialized");
         }
+
         byte[] seed = spec.getSeed();
 
         // TLS 1.2
@@ -150,7 +155,7 @@ final class P11TlsPrfGenerator extends KeyGeneratorSpi {
                             new CK_MECHANISM(mechanism, params), keyID);
                     token.p11.C_SignUpdate(session.id(), 0, seed, 0, seed.length);
                     byte[] out = token.p11.C_SignFinal
-                            (session.id(), spec.getOutputLength());
+                                        (session.id(), spec.getOutputLength());
                     return new SecretKeySpec(out, "TlsPrf");
                 } catch (PKCS11Exception e) {
                     throw new ProviderException("Could not calculate PRF", e);
@@ -160,11 +165,11 @@ final class P11TlsPrfGenerator extends KeyGeneratorSpi {
                 }
             } else {
                 throw new ProviderException("Only Finished message authentication code"+
-                        " generation supported for TLS 1.2.");
+                                            " generation supported for TLS 1.2.");
             }
         }
 
-        byte[] label = P11Util.getBytesUTF8(spec.getLabel());
+        byte[] label = spec.getLabel().getBytes(UTF_8);
 
         if (mechanism == CKM_NSS_TLS_PRF_GENERAL) {
             Session session = null;
@@ -172,7 +177,7 @@ final class P11TlsPrfGenerator extends KeyGeneratorSpi {
             try {
                 session = token.getOpSession();
                 token.p11.C_SignInit
-                        (session.id(), new CK_MECHANISM(mechanism), keyID);
+                    (session.id(), new CK_MECHANISM(mechanism), keyID);
                 token.p11.C_SignUpdate(session.id(), 0, label, 0, label.length);
                 token.p11.C_SignUpdate(session.id(), 0, seed, 0, seed.length);
                 byte[] out = token.p11.C_SignFinal
