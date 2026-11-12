@@ -25,6 +25,8 @@
         <jsign.jvm.access>--add-exports=jdk.crypto.cryptoki/sun.security.pkcs11.wrapper=ALL-UNNAMED</jsign.jvm.access>
         <!-- CI sets this to true so that a missing SoftHSM2 fails the build instead of skipping tests. -->
         <softhsm.required>false</softhsm.required>
+        <!-- Must be published on keyserver.ubuntu.com or keys.openpgp.org, Central verifies the signatures with it. -->
+        <gpg.keyname>E6859CD79F1F3E3BE207555C3409C2FF0184B8FB</gpg.keyname>
         <junit.version>5.11.4</junit.version>
     </properties>
 
@@ -183,6 +185,7 @@
                             </execution>
                         </executions>
                         <configuration>
+                            <keyname>${gpg.keyname}</keyname>
                             <gpgArguments>
                                 <gpgArgument>--pinentry-mode</gpgArgument>
                                 <gpgArgument>loopback</gpgArgument>
