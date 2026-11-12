@@ -173,7 +173,10 @@ abstract class P11Key implements Key {
                 CK_ATTRIBUTE[] attrs = { new CK_ATTRIBUTE(CKA_ALWAYS_AUTHENTICATE) };
                 try {
                     token.p11.C_GetAttributeValue(session.id(), keyID, attrs);
-                    value = attrs[0].getBoolean();
+                    // the JDK wrapper returns booleans it doesn't know as CK_BBOOL bytes
+                    Object v = attrs[0].pValue;
+                    value = (v instanceof Boolean b && b)
+                            || (v instanceof byte[] bytes && bytes.length > 0 && bytes[0] != 0);
                 } catch (PKCS11Exception | RuntimeException e) {
                     if (JSignPKCS11.debug != null) {
                         JSignPKCS11.debug.println("Unable to read CKA_ALWAYS_AUTHENTICATE: " + e);

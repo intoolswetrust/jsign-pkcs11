@@ -605,8 +605,7 @@ final class P11AEADCipher extends CipherSpi {
     protected int engineDoFinal(ByteBuffer inBuffer, ByteBuffer outBuffer)
             throws ShortBufferException, IllegalBlockSizeException,
             BadPaddingException {
-        // direct buffer addresses need JDK internals; the default
-        // implementation copies the data to byte arrays
+        // direct buffer addresses need JDK internals, the default implementation copies
         if (!inBuffer.hasArray() || !outBuffer.hasArray()) {
             return super.engineDoFinal(inBuffer, outBuffer);
         }
@@ -663,8 +662,8 @@ final class P11AEADCipher extends CipherSpi {
         try {
             ensureInitialized();
             if (dataBuffer.size() > 0) {
-                if (in != null && inOfs > 0 && inLen > 0 &&
-                    inOfs < (in.length - inLen)) {
+                // upstream drops the input here unless inOfs > 0 && inOfs + inLen < in.length
+                if (in != null && inLen > 0) {
                     dataBuffer.write(in, inOfs, inLen);
                 }
                 in = dataBuffer.toByteArray();
