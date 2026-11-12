@@ -183,6 +183,7 @@
                             </execution>
                         </executions>
                         <configuration>
+                            <keyname>E6859CD79F1F3E3BE207555C3409C2FF0184B8FB</keyname>
                             <gpgArguments>
                                 <gpgArgument>--pinentry-mode</gpgArgument>
                                 <gpgArgument>loopback</gpgArgument>
