@@ -40,13 +40,7 @@ import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
 import javax.security.auth.callback.PasswordCallback;
 
-import com.sun.crypto.provider.ChaCha20Poly1305Parameters;
-
-import jdk.internal.misc.InnocuousThread;
-import sun.security.util.Debug;
-import sun.security.util.ResourcesMgr;
-import static sun.security.util.SecurityConstants.PROVIDER_VER;
-import static sun.security.util.SecurityProviderConstants.getAliases;
+import static com.github.kwart.jsign.pkcs11.P11Aliases.getAliases;
 
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
@@ -70,6 +64,10 @@ public final class JSignPKCS11 extends AuthProvider {
     private static final long serialVersionUID = -1354835039035306505L;
 
     static final Debug debug = Debug.getInstance("sunpkcs11");
+
+    // same as the JDK providers use
+    private static final String PROVIDER_VER =
+            System.getProperty("java.specification.version");
     // the PKCS11 object through which we make the native calls
     @SuppressWarnings("serial") // Type of field is not Serializable;
                                 // see writeReplace
@@ -438,7 +436,6 @@ public final class JSignPKCS11 extends AuthProvider {
         String P11KeyWrapCipher    = "com.github.kwart.jsign.pkcs11.P11KeyWrapCipher";
         String P11RSACipher        = "com.github.kwart.jsign.pkcs11.P11RSACipher";
         String P11AEADCipher       = "com.github.kwart.jsign.pkcs11.P11AEADCipher";
-        String P11PBECipher        = "com.github.kwart.jsign.pkcs11.P11PBECipher";
         String P11Signature        = "com.github.kwart.jsign.pkcs11.P11Signature";
         String P11PSSSignature     = "com.github.kwart.jsign.pkcs11.P11PSSSignature";
 
@@ -500,24 +497,6 @@ public final class JSignPKCS11 extends AuthProvider {
                 m(CKM_SSL3_MD5_MAC));
         d(MAC, "SslMacSHA1",    P11Mac,
                 m(CKM_SSL3_SHA1_MAC));
-
-        /*
-        * PBA HMacs
-        *
-        * KeyDerivationMech must be supported
-        * for these services to be available.
-        *
-        */
-        d(MAC, "HmacPBESHA1",       P11Mac, m(CKM_SHA_1_HMAC),
-                m(CKM_PBA_SHA1_WITH_SHA1_HMAC));
-        d(MAC, "HmacPBESHA224",     P11Mac, m(CKM_SHA224_HMAC),
-                m(CKM_NSS_PKCS12_PBE_SHA224_HMAC_KEY_GEN));
-        d(MAC, "HmacPBESHA256",     P11Mac, m(CKM_SHA256_HMAC),
-                m(CKM_NSS_PKCS12_PBE_SHA256_HMAC_KEY_GEN));
-        d(MAC, "HmacPBESHA384",     P11Mac, m(CKM_SHA384_HMAC),
-                m(CKM_NSS_PKCS12_PBE_SHA384_HMAC_KEY_GEN));
-        d(MAC, "HmacPBESHA512",     P11Mac, m(CKM_SHA512_HMAC),
-                m(CKM_NSS_PKCS12_PBE_SHA512_HMAC_KEY_GEN));
 
         d(KPG, "RSA",           P11KeyPairGenerator,
                 getAliases("PKCS1"),
@@ -584,20 +563,6 @@ public final class JSignPKCS11 extends AuthProvider {
                 m(CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE,
                     CKM_ECDSA, CKM_ECDSA_SHA1));
 
-        // AlgorithmParameters for EC.
-        // Only needed until we have an EC implementation in the SUN provider.
-        dA(AGP, "EC",            "sun.security.util.ECParameters",
-                m(CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE,
-                    CKM_ECDSA, CKM_ECDSA_SHA1));
-
-
-        d(AGP, "GCM",            "sun.security.util.GCMParameters",
-                m(CKM_AES_GCM));
-
-        dA(AGP, "ChaCha20-Poly1305",
-                "com.sun.crypto.provider.ChaCha20Poly1305Parameters",
-                m(CKM_CHACHA20_POLY1305));
-
         d(KA, "DH",             P11KeyAgreement,
                 dhAlias,
                 m(CKM_DH_PKCS_DERIVE));
@@ -617,59 +582,6 @@ public final class JSignPKCS11 extends AuthProvider {
         d(SKF, "ChaCha20",      P11SecretKeyFactory,
                 m(CKM_CHACHA20_POLY1305));
 
-        /*
-         * PBE Secret Key Factories
-         *
-         * KeyDerivationPrf must be supported for these services
-         * to be available.
-         *
-        */
-        d(SKF, "PBEWithHmacSHA1AndAES_128",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA_1_HMAC));
-        d(SKF, "PBEWithHmacSHA224AndAES_128",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA224_HMAC));
-        d(SKF, "PBEWithHmacSHA256AndAES_128",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA256_HMAC));
-        d(SKF, "PBEWithHmacSHA384AndAES_128",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA384_HMAC));
-        d(SKF, "PBEWithHmacSHA512AndAES_128",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA512_HMAC));
-        d(SKF, "PBEWithHmacSHA1AndAES_256",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA_1_HMAC));
-        d(SKF, "PBEWithHmacSHA224AndAES_256",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA224_HMAC));
-        d(SKF, "PBEWithHmacSHA256AndAES_256",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA256_HMAC));
-        d(SKF, "PBEWithHmacSHA384AndAES_256",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA384_HMAC));
-        d(SKF, "PBEWithHmacSHA512AndAES_256",
-                P11SecretKeyFactory, m(CKM_PKCS5_PBKD2), m(CKM_SHA512_HMAC));
-        /*
-         * PBA Secret Key Factories
-         */
-        d(SKF, "HmacPBESHA1",       P11SecretKeyFactory,
-                m(CKM_PBA_SHA1_WITH_SHA1_HMAC));
-        d(SKF, "HmacPBESHA224",     P11SecretKeyFactory,
-                m(CKM_NSS_PKCS12_PBE_SHA224_HMAC_KEY_GEN));
-        d(SKF, "HmacPBESHA256",     P11SecretKeyFactory,
-                m(CKM_NSS_PKCS12_PBE_SHA256_HMAC_KEY_GEN));
-        d(SKF, "HmacPBESHA384",     P11SecretKeyFactory,
-                m(CKM_NSS_PKCS12_PBE_SHA384_HMAC_KEY_GEN));
-        d(SKF, "HmacPBESHA512",     P11SecretKeyFactory,
-                m(CKM_NSS_PKCS12_PBE_SHA512_HMAC_KEY_GEN));
-        /*
-         * PBKDF2 Secret Key Factories
-         */
-        dA(SKF, "PBKDF2WithHmacSHA1",  P11SecretKeyFactory,
-                m(CKM_PKCS5_PBKD2), m(CKM_SHA_1_HMAC));
-        d(SKF, "PBKDF2WithHmacSHA224", P11SecretKeyFactory,
-                m(CKM_PKCS5_PBKD2), m(CKM_SHA224_HMAC));
-        d(SKF, "PBKDF2WithHmacSHA256", P11SecretKeyFactory,
-                m(CKM_PKCS5_PBKD2), m(CKM_SHA256_HMAC));
-        d(SKF, "PBKDF2WithHmacSHA384", P11SecretKeyFactory,
-                m(CKM_PKCS5_PBKD2), m(CKM_SHA384_HMAC));
-        d(SKF, "PBKDF2WithHmacSHA512", P11SecretKeyFactory,
-                m(CKM_PKCS5_PBKD2), m(CKM_SHA512_HMAC));
 
         // XXX attributes for Ciphers (supported modes, padding)
         dA(CIP, "ARCFOUR",                      P11Cipher,
@@ -763,44 +675,6 @@ public final class JSignPKCS11 extends AuthProvider {
                 m(CKM_RSA_PKCS));
         d(CIP, "RSA/ECB/NoPadding",             P11RSACipher,
                 m(CKM_RSA_X_509));
-
-        /*
-         * PBE Ciphers
-         *
-         * KeyDerivationMech and KeyDerivationPrf must be supported
-         * for these services to be available.
-         *
-        */
-        d(CIP, "PBEWithHmacSHA1AndAES_128",   P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA_1_HMAC));
-        d(CIP, "PBEWithHmacSHA224AndAES_128", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA224_HMAC));
-        d(CIP, "PBEWithHmacSHA256AndAES_128", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA256_HMAC));
-        d(CIP, "PBEWithHmacSHA384AndAES_128", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA384_HMAC));
-        d(CIP, "PBEWithHmacSHA512AndAES_128", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA512_HMAC));
-        d(CIP, "PBEWithHmacSHA1AndAES_256",   P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA_1_HMAC));
-        d(CIP, "PBEWithHmacSHA224AndAES_256", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA224_HMAC));
-        d(CIP, "PBEWithHmacSHA256AndAES_256", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA256_HMAC));
-        d(CIP, "PBEWithHmacSHA384AndAES_256", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA384_HMAC));
-        d(CIP, "PBEWithHmacSHA512AndAES_256", P11PBECipher,
-                m(CKM_AES_CBC_PAD, CKM_AES_CBC),
-                m(CKM_PKCS5_PBKD2, CKM_SHA512_HMAC));
 
         d(SIG, "RawDSA",        P11Signature,
                 List.of("NONEwithDSA"),
@@ -930,29 +804,6 @@ public final class JSignPKCS11 extends AuthProvider {
                 m(CKM_SHA3_384_RSA_PKCS_PSS));
         d(SIG, "SHA3-512withRSASSA-PSS", P11PSSSignature,
                 m(CKM_SHA3_512_RSA_PKCS_PSS));
-
-        d(KG, "SunTlsRsaPremasterSecret",
-                    "com.github.kwart.jsign.pkcs11.P11TlsRsaPremasterSecretGenerator",
-                List.of("SunTls12RsaPremasterSecret"),
-                m(CKM_SSL3_PRE_MASTER_KEY_GEN, CKM_TLS_PRE_MASTER_KEY_GEN));
-        d(KG, "SunTlsMasterSecret",
-                    "com.github.kwart.jsign.pkcs11.P11TlsMasterSecretGenerator",
-                m(CKM_SSL3_MASTER_KEY_DERIVE, CKM_TLS_MASTER_KEY_DERIVE,
-                    CKM_SSL3_MASTER_KEY_DERIVE_DH,
-                    CKM_TLS_MASTER_KEY_DERIVE_DH));
-        d(KG, "SunTls12MasterSecret",
-                "com.github.kwart.jsign.pkcs11.P11TlsMasterSecretGenerator",
-            m(CKM_TLS12_MASTER_KEY_DERIVE, CKM_TLS12_MASTER_KEY_DERIVE_DH));
-        d(KG, "SunTlsKeyMaterial",
-                    "com.github.kwart.jsign.pkcs11.P11TlsKeyMaterialGenerator",
-                m(CKM_SSL3_KEY_AND_MAC_DERIVE, CKM_TLS_KEY_AND_MAC_DERIVE));
-        d(KG, "SunTls12KeyMaterial",
-                "com.github.kwart.jsign.pkcs11.P11TlsKeyMaterialGenerator",
-            m(CKM_TLS12_KEY_AND_MAC_DERIVE));
-        d(KG, "SunTlsPrf", "com.github.kwart.jsign.pkcs11.P11TlsPrfGenerator",
-                m(CKM_TLS_PRF, CKM_NSS_TLS_PRF_GENERAL));
-        d(KG, "SunTls12Prf", "com.github.kwart.jsign.pkcs11.P11TlsPrfGenerator",
-                m(CKM_TLS_MAC));
     }
 
     // background thread that periodically checks for token insertion
@@ -997,13 +848,7 @@ public final class JSignPKCS11 extends AuthProvider {
             return;
         }
         poller = new TokenPoller(this);
-        Thread t = InnocuousThread.newSystemThread(
-                "Poller-" + getName(),
-                poller,
-                Thread.MIN_PRIORITY);
-        assert t.getContextClassLoader() == null;
-        t.setDaemon(true);
-        t.start();
+        P11Util.startDaemonThread("Poller-" + getName(), poller);
 
     }
 
@@ -1074,13 +919,7 @@ public final class JSignPKCS11 extends AuthProvider {
     @SuppressWarnings("removal")
     private void createCleaner() {
         cleaner = new NativeResourceCleaner();
-        Thread t = InnocuousThread.newSystemThread(
-                "Cleanup-JSignPKCS11",
-                cleaner,
-                Thread.MIN_PRIORITY);
-        assert t.getContextClassLoader() == null;
-        t.setDaemon(true);
-        t.start();
+        P11Util.startDaemonThread("Cleanup-JSignPKCS11", cleaner);
     }
 
     // destroy the token. Called if we detect that it has been removed
@@ -1308,8 +1147,6 @@ public final class JSignPKCS11 extends AuthProvider {
                 } else if (algorithm.contains("/KW/") ||
                         algorithm.contains("/KWP/")) {
                     return new P11KeyWrapCipher(token, algorithm, mechanism);
-                } else if (algorithm.startsWith("PBE")) {
-                    return new P11PBECipher(token, algorithm, mechanism);
                 } else {
                     return new P11Cipher(token, algorithm, mechanism);
                 }
@@ -1336,39 +1173,11 @@ public final class JSignPKCS11 extends AuthProvider {
             } else if (type == SKF) {
                 return new P11SecretKeyFactory(token, algorithm);
             } else if (type == KG) {
-                // reference equality
-                if (algorithm == "SunTlsRsaPremasterSecret") {
-                    return new P11TlsRsaPremasterSecretGenerator(
-                        token, algorithm, mechanism);
-                } else if (algorithm == "SunTlsMasterSecret"
-                        || algorithm == "SunTls12MasterSecret") {
-                    return new P11TlsMasterSecretGenerator(
-                        token, algorithm, mechanism);
-                } else if (algorithm == "SunTlsKeyMaterial"
-                        || algorithm == "SunTls12KeyMaterial") {
-                    return new P11TlsKeyMaterialGenerator(
-                        token, algorithm, mechanism);
-                } else if (algorithm == "SunTlsPrf"
-                        || algorithm == "SunTls12Prf") {
-                    return new P11TlsPrfGenerator(token, algorithm, mechanism);
-                } else {
-                    return new P11KeyGenerator(token, algorithm, mechanism);
-                }
+                return new P11KeyGenerator(token, algorithm, mechanism);
             } else if (type == SR) {
                 return token.getRandom();
             } else if (type == KS) {
                 return token.getKeyStore();
-            } else if (type == AGP) {
-                if (algorithm == "EC") {
-                    return new sun.security.util.ECParameters();
-                } else if (algorithm == "GCM") {
-                    return new sun.security.util.GCMParameters();
-                } else if (algorithm == "ChaCha20-Poly1305") {
-                    return new ChaCha20Poly1305Parameters(); // from SunJCE
-                } else {
-                    throw new NoSuchAlgorithmException("Unsupported algorithm: "
-                            + algorithm);
-                }
             } else {
                 throw new NoSuchAlgorithmException("Unknown type: " + type);
             }
@@ -1526,8 +1335,7 @@ public final class JSignPKCS11 extends AuthProvider {
             }
 
             java.text.MessageFormat form = new java.text.MessageFormat
-                        (ResourcesMgr.getString
-                        ("PKCS11.Token.providerName.Password."));
+                        ("PKCS11 Token [{0}] Password: ");
             Object[] source = { getName() };
 
             PasswordCallback pcall = new PasswordCallback(form.format(source),

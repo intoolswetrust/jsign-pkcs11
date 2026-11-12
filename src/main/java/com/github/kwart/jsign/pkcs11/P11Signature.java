@@ -32,20 +32,12 @@ import java.nio.ByteBuffer;
 import java.security.*;
 import java.security.interfaces.*;
 import java.security.spec.AlgorithmParameterSpec;
+import java.util.Arrays;
 
-import jdk.internal.access.JavaNioAccess;
-import jdk.internal.access.SharedSecrets;
-import sun.nio.ch.DirectBuffer;
-
-import sun.security.util.*;
-
-import sun.security.rsa.RSAUtil;
-import sun.security.rsa.RSAPadding;
 
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
-import sun.security.util.KeyUtil;
 
 /**
  * Signature implementation class. This class currently supports the
@@ -100,7 +92,6 @@ import sun.security.util.KeyUtil;
  */
 final class P11Signature extends SignatureSpi {
 
-    private static final JavaNioAccess NIO_ACCESS = SharedSecrets.getJavaNioAccess();
 
     // token instance
     private final Token token;
@@ -115,7 +106,8 @@ final class P11Signature extends SignatureSpi {
     private final long mechanism;
 
     // digest algorithm OID, if we encode RSA signature ourselves
-    private final ObjectIdentifier digestOID;
+    // standard name of the digest for the DigestInfo of RSA signatures
+    private final String digestAlg;
 
     // type, one of T_* below
     private final int type;
@@ -174,7 +166,7 @@ final class P11Signature extends SignatureSpi {
         this.algorithm = algorithm;
         this.mechanism = mechanism;
         byte[] buffer = null;
-        ObjectIdentifier digestOID = null;
+        String digestAlg = null;
         MessageDigest md = null;
         switch ((int) mechanism) {
             case (int) CKM_MD2_RSA_PKCS,
@@ -241,20 +233,19 @@ final class P11Signature extends SignatureSpi {
                 } else {
                     type = T_DIGEST;
                     md = MessageDigest.getInstance
-                            (getDigestEnum(algorithm).stdName());
+                            (DigestAlgorithms.fromSignatureAlgorithm(algorithm));
                 }
             }
             case (int) CKM_RSA_PKCS, (int) CKM_RSA_X_509 -> {
                 keyAlgorithm = "RSA";
                 type = T_DIGEST;
-                KnownOIDs digestAlg = getDigestEnum(algorithm);
-                md = MessageDigest.getInstance(digestAlg.stdName());
-                digestOID = ObjectIdentifier.of(digestAlg);
+                digestAlg = DigestAlgorithms.fromSignatureAlgorithm(algorithm);
+                md = MessageDigest.getInstance(digestAlg);
             }
             default -> throw new ProviderException("Unknown mechanism: " + mechanism);
         }
         this.buffer = buffer;
-        this.digestOID = digestOID;
+        this.digestAlg = digestAlg;
         this.md = md;
         if (algorithm.endsWith("inP1363Format")) {
             this.p1363Format = true;
@@ -346,7 +337,6 @@ final class P11Signature extends SignatureSpi {
         }
     }
 
-    // CKU_CONTEXT_SPECIFIC login right after C_SignInit; see JSignPKCS11.contextSpecificLogin
     private void contextSpecificLogin(long keyID) {
         try {
             token.provider.contextSpecificLogin(session, p11Key, keyID);
@@ -453,15 +443,16 @@ final class P11Signature extends SignatureSpi {
         }
     }
 
+    // PKCS#1 v1.5 padding needs at least 11 bytes
+    private static final int PKCS1_PADDING_OVERHEAD = 11;
+
     private void checkRSAKeyLength(int len) throws InvalidKeyException {
-        RSAPadding padding;
-        try {
-            padding = RSAPadding.getInstance
-                (RSAPadding.PAD_BLOCKTYPE_1, (len + 7) >> 3);
-        } catch (InvalidAlgorithmParameterException iape) {
-            throw new InvalidKeyException(iape.getMessage(), iape);
+        int paddedSize = (len + 7) >> 3;
+        // same limit as sun.security.rsa.RSAPadding
+        if (paddedSize < 64) {
+            throw new InvalidKeyException("Padded size must be at least 64");
         }
-        int maxDataSize = padding.getMaxDataSize();
+        int maxDataSize = paddedSize - PKCS1_PADDING_OVERHEAD;
         int encodedLength = switch (algorithm) {
             case "MD5withRSA", "MD2withRSA" -> 34;
             case "SHA1withRSA" -> 35;
@@ -594,30 +585,8 @@ final class P11Signature extends SignatureSpi {
         }
         switch (type) {
             case T_UPDATE -> {
-                if (!(byteBuffer instanceof DirectBuffer dByteBuffer)) {
-                    // cannot do better than default impl
-                    super.engineUpdate(byteBuffer);
-                    return;
-                }
-                int ofs = byteBuffer.position();
-                NIO_ACCESS.acquireSession(byteBuffer);
-                try {
-                    long addr = dByteBuffer.address();
-                    if (mode == M_SIGN) {
-                        token.p11.C_SignUpdate
-                                (session.id(), addr + ofs, null, 0, len);
-                    } else {
-                        token.p11.C_VerifyUpdate
-                                (session.id(), addr + ofs, null, 0, len);
-                    }
-                    bytesProcessed += len;
-                    byteBuffer.position(ofs + len);
-                } catch (PKCS11Exception e) {
-                    reset(false);
-                    throw new ProviderException("Update failed", e);
-                } finally {
-                    NIO_ACCESS.releaseSession(byteBuffer);
-                }
+                // direct buffer addresses need JDK internals, the default implementation copies
+                super.engineUpdate(byteBuffer);
             }
             case T_DIGEST -> {
                 md.update(byteBuffer);
@@ -769,40 +738,22 @@ final class P11Signature extends SignatureSpi {
         }
     }
 
+    // EMSA-PKCS1-v1_5 encoding (block type 1): 00 01 FF..FF 00 data
     private byte[] pkcs1Pad(byte[] data) {
-        try {
-            int len = (p11Key.length() + 7) >> 3;
-            RSAPadding padding = RSAPadding.getInstance
-                                        (RSAPadding.PAD_BLOCKTYPE_1, len);
-            byte[] result = padding.pad(data);
-            if (result == null) {
-                throw new ProviderException("Error padding data");
-            }
-            return result;
-        } catch (InvalidKeyException | InvalidAlgorithmParameterException e) {
-            throw new ProviderException(e);
+        int len = (p11Key.length() + 7) >> 3;
+        if (data.length > len - PKCS1_PADDING_OVERHEAD) {
+            throw new ProviderException("Error padding data");
         }
+        byte[] result = new byte[len];
+        result[1] = 1;
+        int psEnd = len - data.length - 1;
+        Arrays.fill(result, 2, psEnd, (byte) 0xff);
+        System.arraycopy(data, 0, result, psEnd + 1, data.length);
+        return result;
     }
 
     private byte[] encodeSignature(byte[] digest) throws SignatureException {
-        return RSAUtil.encodeSignature(digestOID, digest);
-    }
-
-    private static KnownOIDs getDigestEnum(String algorithm)
-            throws NoSuchAlgorithmException {
-        try {
-            String digAlg = SignatureUtil.extractDigestAlgFromDwithE(algorithm);
-            KnownOIDs k = KnownOIDs.findMatch(digAlg);
-            if (k == null) {
-                throw new NoSuchAlgorithmException
-                        ("Unsupported digest algorithm: " + digAlg);
-            }
-            return k;
-        } catch (IllegalArgumentException iae) {
-            // should never happen
-            throw new NoSuchAlgorithmException("Unknown signature: " +
-                    algorithm, iae);
-        }
+        return DigestAlgorithms.encodeDigestInfo(digestAlg, digest);
     }
 
 //    private static byte[] decodeSignature(byte[] signature) throws IOException {
@@ -818,29 +769,17 @@ final class P11Signature extends SignatureSpi {
         int n = signature.length >> 1;
         BigInteger r = new BigInteger(1, P11Util.subarray(signature, 0, n));
         BigInteger s = new BigInteger(1, P11Util.subarray(signature, n, n));
-        DerOutputStream outseq = new DerOutputStream(100);
-        outseq.putInteger(r);
-        outseq.putInteger(s);
-        DerValue result = new DerValue(DerValue.tag_Sequence,
-                outseq.toByteArray());
-        return result.toByteArray();
+        return DerUtil.encode(DerUtil.TAG_SEQUENCE,
+                DerUtil.encodeInteger(r), DerUtil.encodeInteger(s));
     }
 
     private static byte[] asn1ToDSA(byte[] sig, int sigLen)
             throws SignatureException {
         try {
             // Enforce strict DER checking for signatures
-            DerInputStream in = new DerInputStream(sig, 0, sig.length, false);
-            DerValue[] values = in.getSequence(2);
-
-            // check number of components in the read sequence
-            // and trailing data
-            if ((values.length != 2) || (in.available() != 0)) {
-                throw new IOException("Invalid encoding for signature");
-            }
-
-            BigInteger r = values[0].getPositiveBigInteger();
-            BigInteger s = values[1].getPositiveBigInteger();
+            BigInteger[] values = DerUtil.decodeIntegerPair(sig);
+            BigInteger r = values[0];
+            BigInteger s = values[1];
 
             byte[] br = toByteArray(r, sigLen/2);
             byte[] bs = toByteArray(s, sigLen/2);
@@ -858,21 +797,13 @@ final class P11Signature extends SignatureSpi {
     private static byte[] asn1ToECDSA(byte[] sig) throws SignatureException {
         try {
             // Enforce strict DER checking for signatures
-            DerInputStream in = new DerInputStream(sig, 0, sig.length, false);
-            DerValue[] values = in.getSequence(2);
-
-            // check number of components in the read sequence
-            // and trailing data
-            if ((values.length != 2) || (in.available() != 0)) {
-                throw new IOException("Invalid encoding for signature");
-            }
-
-            BigInteger r = values[0].getPositiveBigInteger();
-            BigInteger s = values[1].getPositiveBigInteger();
+            BigInteger[] values = DerUtil.decodeIntegerPair(sig);
+            BigInteger r = values[0];
+            BigInteger s = values[1];
 
             // trim leading zeroes
-            byte[] br = KeyUtil.trimZeroes(r.toByteArray());
-            byte[] bs = KeyUtil.trimZeroes(s.toByteArray());
+            byte[] br = P11Util.trimZeroes(r.toByteArray());
+            byte[] bs = P11Util.trimZeroes(s.toByteArray());
             int k = Math.max(br.length, bs.length);
             // r and s each occupy half the array
             byte[] res = new byte[k << 1];

@@ -31,11 +31,7 @@ import java.security.*;
 
 import javax.crypto.SecretKey;
 
-import jdk.internal.access.JavaNioAccess;
-import jdk.internal.access.SharedSecrets;
-import sun.nio.ch.DirectBuffer;
 
-import sun.security.util.MessageDigestSpi2;
 
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
@@ -53,10 +49,8 @@ import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
  * @author  Andreas Sterbenz
  * @since   1.5
  */
-final class P11Digest extends MessageDigestSpi implements Cloneable,
-    MessageDigestSpi2 {
+final class P11Digest extends MessageDigestSpi implements Cloneable {
 
-    private static final JavaNioAccess NIO_ACCESS = SharedSecrets.getJavaNioAccess();
 
     /* fields initialized, no session acquired */
     private static final int S_BLANK    = 1;
@@ -261,42 +255,6 @@ final class P11Digest extends MessageDigestSpi implements Cloneable,
             throw new ProviderException("update(SecretKey) failed", e);
         } finally {
             p11Key.releaseKeyID();
-        }
-    }
-
-    // see JCA spec
-    protected void engineUpdate(ByteBuffer byteBuffer) {
-        int len = byteBuffer.remaining();
-        if (len <= 0) {
-            return;
-        }
-
-        if (!(byteBuffer instanceof DirectBuffer dByteBuffer)) {
-            super.engineUpdate(byteBuffer);
-            return;
-        }
-
-        fetchSession();
-        int ofs = byteBuffer.position();
-        try {
-            if (state == S_BUFFERED) {
-                token.p11.C_DigestInit(session.id(), mechanism);
-                state = S_INIT;
-            }
-            if (bufOfs != 0) {
-                token.p11.C_DigestUpdate(session.id(), 0, buffer, 0, bufOfs);
-                bufOfs = 0;
-            }
-            NIO_ACCESS.acquireSession(byteBuffer);
-            try {
-                token.p11.C_DigestUpdate(session.id(), dByteBuffer.address() + ofs, null, 0, len);
-            } finally {
-                NIO_ACCESS.releaseSession(byteBuffer);
-            }
-            byteBuffer.position(ofs + len);
-        } catch (PKCS11Exception e) {
-            engineReset();
-            throw new ProviderException("update() failed", e);
         }
     }
 

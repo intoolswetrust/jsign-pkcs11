@@ -33,7 +33,6 @@ import javax.crypto.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
 import sun.security.pkcs11.wrapper.*;
-import sun.security.util.KeyUtil;
 
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
@@ -170,7 +169,7 @@ final class P11ECDHKeyAgreement extends KeyAgreementSpi {
         if (algorithm == null) {
             throw new NoSuchAlgorithmException("Algorithm must not be null");
         }
-        if (!KeyUtil.isSupportedKeyAgreementOutputAlgorithm(algorithm)) {
+        if (!P11Util.isSupportedKeyAgreementOutputAlgorithm(algorithm)) {
             throw new NoSuchAlgorithmException(
                     "Unsupported secret key algorithm: " + algorithm);
         }

@@ -35,14 +35,10 @@ import javax.crypto.MacSpi;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.PBEParameterSpec;
 
-import jdk.internal.access.JavaNioAccess;
-import jdk.internal.access.SharedSecrets;
-import sun.nio.ch.DirectBuffer;
 
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
-import sun.security.util.PBEUtil;
 
 /**
  * MAC implementation class. This class currently supports HMAC using
@@ -61,7 +57,6 @@ import sun.security.util.PBEUtil;
  */
 final class P11Mac extends MacSpi {
 
-    private static final JavaNioAccess NIO_ACCESS = SharedSecrets.getJavaNioAccess();
 
     // token instance
     private final Token token;
@@ -69,8 +64,6 @@ final class P11Mac extends MacSpi {
     // algorithm name
     private final String algorithm;
 
-    // PBEKeyInfo if algorithm is PBE-related, otherwise null
-    private final P11SecretKeyFactory.PBEKeyInfo svcPbeKi;
 
     // mechanism object
     private final CK_MECHANISM ckMechanism;
@@ -95,7 +88,6 @@ final class P11Mac extends MacSpi {
         super();
         this.token = token;
         this.algorithm = algorithm;
-        this.svcPbeKi = P11SecretKeyFactory.getPBEKeyInfo(algorithm);
         Long params = null;
         macLength = switch ((int) mechanism) {
             case (int) CKM_MD5_HMAC -> 16;
@@ -202,42 +194,6 @@ final class P11Mac extends MacSpi {
             throws InvalidKeyException, InvalidAlgorithmParameterException {
         reset(true);
         p11Key = null;
-        if (svcPbeKi != null) {
-            if (key instanceof P11Key) {
-                // If the key is a P11Key, it must come from a PBE derivation
-                // because this is a PBE Mac service. In addition to checking
-                // the key, check that params (if passed) are consistent.
-                PBEUtil.checkKeyAndParams(key, params, algorithm);
-            } else {
-                // If the key is not a P11Key, a derivation is needed. Data for
-                // derivation has to be carried either as part of the key or
-                // params. Use JSignPKCS11 PBE key derivation to obtain a P11Key.
-                // Assign the derived key to p11Key because conversion is never
-                // needed for this case.
-                PBEKeySpec pbeKeySpec = PBEUtil.getPBAKeySpec(key, params);
-                try {
-                    P11Key.P11PBEKey p11PBEKey =
-                            P11SecretKeyFactory.derivePBEKey(token,
-                            pbeKeySpec, svcPbeKi);
-                    // This Mac service uses the token where the derived key
-                    // lives so there won't be any need to re-derive and use
-                    // the password. The p11Key cannot be accessed out of this
-                    // class.
-                    p11PBEKey.clearPassword();
-                    p11Key = p11PBEKey;
-                } catch (InvalidKeySpecException e) {
-                    throw new InvalidKeyException(e);
-                } finally {
-                    pbeKeySpec.clearPassword();
-                }
-            }
-            if (params instanceof PBEParameterSpec pbeParams) {
-                // For PBE services, reassign params to the underlying
-                // service params. Notice that Mac services expect this
-                // value to be null.
-                params = pbeParams.getParameterSpec();
-            }
-        }
         if (params != null) {
             throw new InvalidAlgorithmParameterException(
                     "Parameters not supported");
@@ -291,28 +247,4 @@ final class P11Mac extends MacSpi {
         }
     }
 
-    // see JCE spec
-    protected void engineUpdate(ByteBuffer byteBuffer) {
-        try {
-            ensureInitialized();
-            int len = byteBuffer.remaining();
-            if (len <= 0) {
-                return;
-            }
-            if (!(byteBuffer instanceof DirectBuffer dByteBuffer)) {
-                super.engineUpdate(byteBuffer);
-                return;
-            }
-            int ofs = byteBuffer.position();
-            NIO_ACCESS.acquireSession(byteBuffer);
-            try  {
-                token.p11.C_SignUpdate(session.id(), dByteBuffer.address() + ofs, null, 0, len);
-            } finally {
-                NIO_ACCESS.releaseSession(byteBuffer);
-            }
-            byteBuffer.position(ofs + len);
-        } catch (PKCS11Exception e) {
-            throw new ProviderException("update() failed", e);
-        }
-    }
 }

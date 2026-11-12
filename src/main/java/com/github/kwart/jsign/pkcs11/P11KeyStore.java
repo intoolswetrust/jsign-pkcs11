@@ -65,9 +65,6 @@ import javax.security.auth.callback.PasswordCallback;
 import javax.security.auth.callback.CallbackHandler;
 import javax.security.auth.callback.UnsupportedCallbackException;
 
-import sun.security.util.Debug;
-import sun.security.util.DerValue;
-import sun.security.util.ECUtil;
 
 import static com.github.kwart.jsign.pkcs11.P11Util.*;
 
@@ -75,7 +72,6 @@ import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
 
-import sun.security.rsa.RSAKeyFactory;
 
 final class P11KeyStore extends KeyStoreSpi {
 
@@ -1295,7 +1291,7 @@ final class P11KeyStore extends KeyStoreSpi {
             // This check will combine our "don't care" values here
             // with the system-wide min/max values.
             try {
-                RSAKeyFactory.checkKeyLengths(keyLength, null,
+                P11Util.checkRSAKeyLengths(keyLength, null,
                     -1, Integer.MAX_VALUE);
             } catch (InvalidKeyException e) {
                 throw new KeyStoreException(e.getMessage(), e);
@@ -1346,7 +1342,7 @@ final class P11KeyStore extends KeyStoreSpi {
             byte[] encodedParams = attrs[0].getByteArray();
             try {
                 ECParameterSpec params =
-                    ECUtil.getECParameterSpec(null, encodedParams);
+                    P11ECUtil.decodeParameters(encodedParams);
                 keyLength = params.getCurve().getField().getFieldSize();
             } catch (IOException e) {
                 // we do not want to accept key with unsupported parameters
@@ -1744,7 +1740,7 @@ final class P11KeyStore extends KeyStoreSpi {
             }
 
             byte[] encodedParams =
-                ECUtil.encodeECParameterSpec(null, ecKey.getParams());
+                P11ECUtil.encodeParameters(ecKey.getParams());
             attrs = new CK_ATTRIBUTE[] {
                 ATTR_TOKEN_TRUE,
                 ATTR_CLASS_PKEY,
@@ -1916,7 +1912,7 @@ final class P11KeyStore extends KeyStoreSpi {
             ECPublicKey ecPub = (ECPublicKey)publicKey;
             ECPoint point = ecPub.getW();
             ECParameterSpec params = ecPub.getParams();
-            byte[] encodedPoint = ECUtil.encodePoint(point, params.getCurve());
+            byte[] encodedPoint = P11ECUtil.encodePoint(point, params.getCurve());
             if (id) {
                 attrs[0] = new CK_ATTRIBUTE(CKA_ID, sha1(encodedPoint));
             }
@@ -2126,13 +2122,19 @@ final class P11KeyStore extends KeyStoreSpi {
                 serialNum.toString();
     }
 
+    // ASN.1 PrintableString characters
+    private static boolean isPrintableStringChar(char ch) {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+                || (ch >= '0' && ch <= '9') || " '()+,-./:=?".indexOf(ch) >= 0;
+    }
+
     /**
      * build CKA_ID string from bytes
      */
     private static String getID(byte[] bytes) {
         boolean printable = true;
         for (int i = 0; i < bytes.length; i++) {
-            if (!DerValue.isPrintableStringChar((char)bytes[i])) {
+            if (!isPrintableStringChar((char)bytes[i])) {
                 printable = false;
                 break;
             }

@@ -25,13 +25,19 @@
 
 package com.github.kwart.jsign.pkcs11;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.ref.Cleaner;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.Charset;
 import java.security.*;
+import java.util.Arrays;
 
+import sun.security.pkcs11.wrapper.CK_MECHANISM;
+import sun.security.pkcs11.wrapper.PKCS11;
 import sun.security.pkcs11.wrapper.PKCS11Exception;
 import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
 
@@ -98,8 +104,7 @@ public final class P11Util {
         Provider p = sun;
         if (p == null) {
             synchronized (LOCK) {
-                p = getProvider
-                    (sun, "SUN", "sun.security.provider.Sun");
+                p = getProvider(sun, "SUN");
                 sun = p;
             }
         }
@@ -110,8 +115,7 @@ public final class P11Util {
         Provider p = sunRsaSign;
         if (p == null) {
             synchronized (LOCK) {
-                p = getProvider
-                    (sunRsaSign, "SunRsaSign", "sun.security.rsa.SunRsaSign");
+                p = getProvider(sunRsaSign, "SunRsaSign");
                 sunRsaSign = p;
             }
         }
@@ -122,47 +126,171 @@ public final class P11Util {
         Provider p = sunJce;
         if (p == null) {
             synchronized (LOCK) {
-                p = getProvider
-                    (sunJce, "SunJCE", "com.sun.crypto.provider.SunJCE");
+                p = getProvider(sunJce, "SunJCE");
                 sunJce = p;
             }
         }
         return p;
     }
 
-    @SuppressWarnings("removal")
-    private static Provider getProvider(Provider p, String providerName,
-            String className) {
+    private static Provider getProvider(Provider p, String providerName) {
         if (p != null) {
             return p;
         }
         p = Security.getProvider(providerName);
         if (p == null) {
-            try {
-                final Class<?> c = Class.forName(className);
-                p = AccessController.doPrivileged(
-                    new PrivilegedAction<Provider>() {
-                        public Provider run() {
-                            try {
-                                @SuppressWarnings("deprecation")
-                                Object o = c.newInstance();
-                                return (Provider) o;
-                            } catch (Exception e) {
-                                throw new ProviderException(
-                                        "Could not find provider " +
-                                                providerName, e);
-                            }
-                        }
-                    }, null, new RuntimePermission(
-                            "accessClassInPackage." + c.getPackageName()));
-            } catch (ClassNotFoundException e) {
-                // Unexpected, as className is not a user but a
-                // P11Util-internal value.
-                throw new ProviderException("Could not find provider " +
-                        providerName, e);
-            }
+            throw new ProviderException("Could not find provider " + providerName);
         }
         return p;
+    }
+
+    /**
+     * Starts a daemon thread with the minimum priority and no context class loader.
+     */
+    static void startDaemonThread(String name, Runnable runnable) {
+        Thread t = new Thread(null, runnable, name, 0, false);
+        t.setContextClassLoader(null);
+        t.setPriority(Thread.MIN_PRIORITY);
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static final class RandomHolder {
+        static final SecureRandom RANDOM = new SecureRandom();
+    }
+
+    /**
+     * Returns a shared SecureRandom instance.
+     */
+    static SecureRandom getSecureRandom() {
+        return RandomHolder.RANDOM;
+    }
+
+    /**
+     * Returns the array without leading zero bytes.
+     */
+    static byte[] trimZeroes(byte[] b) {
+        int i = 0;
+        while ((i < b.length - 1) && (b[i] == 0)) {
+            i++;
+        }
+        return i == 0 ? b : Arrays.copyOfRange(b, i, b.length);
+    }
+
+    // CK_MECHANISM.freeHandle() was removed in JDK 25
+    private static final MethodHandle FREE_HANDLE = findWrapperMethod(
+            CK_MECHANISM.class, "freeHandle", MethodType.methodType(void.class));
+
+    // PKCS11.C_GCM{En,De}cryptInitWithRetry() exist since JDK 21.0.5
+    private static final MethodType GCM_INIT_TYPE = MethodType.methodType(void.class,
+            long.class, CK_MECHANISM.class, long.class, boolean.class);
+    private static final MethodHandle GCM_ENCRYPT_INIT = findWrapperMethod(
+            PKCS11.class, "C_GCMEncryptInitWithRetry", GCM_INIT_TYPE);
+    private static final MethodHandle GCM_DECRYPT_INIT = findWrapperMethod(
+            PKCS11.class, "C_GCMDecryptInitWithRetry", GCM_INIT_TYPE);
+
+    private static MethodHandle findWrapperMethod(Class<?> c, String name, MethodType type) {
+        try {
+            return MethodHandles.publicLookup().findVirtual(c, name, type);
+        } catch (NoSuchMethodException | IllegalAccessException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Frees the native memory of the mechanism parameters, if the running JDK
+     * keeps it.
+     */
+    static void freeMechanism(CK_MECHANISM mechanism) {
+        if (FREE_HANDLE != null) {
+            try {
+                FREE_HANDLE.invoke(mechanism);
+            } catch (Throwable t) {
+                throw new ProviderException(t);
+            }
+        }
+    }
+
+    /**
+     * Calls C_GCMEncryptInitWithRetry or C_GCMDecryptInitWithRetry if the
+     * running JDK has them, otherwise C_EncryptInit or C_DecryptInit.
+     */
+    static void gcmInit(PKCS11 p11, boolean encrypt, long session,
+            CK_MECHANISM mechanism, long keyID, boolean useNormativeVerFirst)
+            throws PKCS11Exception {
+        MethodHandle mh = encrypt ? GCM_ENCRYPT_INIT : GCM_DECRYPT_INIT;
+        if (mh == null) {
+            if (encrypt) {
+                p11.C_EncryptInit(session, mechanism, keyID);
+            } else {
+                p11.C_DecryptInit(session, mechanism, keyID);
+            }
+            return;
+        }
+        try {
+            mh.invoke(p11, session, mechanism, keyID, useNormativeVerFirst);
+        } catch (PKCS11Exception | RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException(t);
+        }
+    }
+
+    // limits of sun.security.rsa.RSAKeyFactory
+    private static final int MAX_RSA_MODLEN = 16384;
+    private static final int MAX_RSA_MODLEN_RESTRICT_EXP = 3072;
+    private static final int MAX_RSA_RESTRICTED_EXPLEN = 64;
+    private static final boolean RESTRICT_RSA_EXPONENT = Boolean.parseBoolean(
+            System.getProperty("sun.security.rsa.restrictRSAExponent", "true"));
+
+    /**
+     * Same checks as sun.security.rsa.RSAKeyFactory.checkKeyLengths().
+     */
+    static void checkRSAKeyLengths(int modulusLen, BigInteger exponent,
+            int minModulusLen, int maxModulusLen) throws InvalidKeyException {
+        if ((minModulusLen > 0) && (modulusLen < minModulusLen)) {
+            throw new InvalidKeyException("RSA keys must be at least " +
+                minModulusLen + " bits long");
+        }
+        int maxLen = Math.min(maxModulusLen, MAX_RSA_MODLEN);
+        if (modulusLen > maxLen) {
+            throw new InvalidKeyException(
+                "RSA keys must be no longer than " + maxLen + " bits");
+        }
+        if (RESTRICT_RSA_EXPONENT && (exponent != null) &&
+                (modulusLen > MAX_RSA_MODLEN_RESTRICT_EXP) &&
+                (exponent.bitLength() > MAX_RSA_RESTRICTED_EXPLEN)) {
+            throw new InvalidKeyException(
+                "RSA exponents can be no longer than " +
+                MAX_RSA_RESTRICTED_EXPLEN + " bits " +
+                " if modulus is greater than " +
+                MAX_RSA_MODLEN_RESTRICT_EXP + " bits");
+        }
+    }
+
+    // same as sun.security.util.KeyUtil.isSupportedKeyAgreementOutputAlgorithm()
+    static boolean isSupportedKeyAgreementOutputAlgorithm(String alg) {
+        return alg.equalsIgnoreCase("TlsPremasterSecret")
+                || alg.equalsIgnoreCase("Generic");
+    }
+
+    /**
+     * Same checks as sun.security.util.KeyUtil.validate() for DH public keys:
+     * y in [2, p-2] and y is not a factor of p.
+     */
+    static void validateDHPublicKey(BigInteger p, BigInteger y)
+            throws InvalidKeyException {
+        if (y.compareTo(BigInteger.ONE) <= 0) {
+            throw new InvalidKeyException(
+                    "Diffie-Hellman public key is too small");
+        }
+        if (y.compareTo(p.subtract(BigInteger.ONE)) >= 0) {
+            throw new InvalidKeyException(
+                    "Diffie-Hellman public key is too large");
+        }
+        if (p.remainder(y).signum() == 0) {
+            throw new InvalidKeyException("Invalid Diffie-Hellman parameters");
+        }
     }
 
     static byte[] convert(byte[] input, int offset, int len) {

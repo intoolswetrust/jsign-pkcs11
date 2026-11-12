@@ -37,21 +37,11 @@ import javax.crypto.*;
 import javax.crypto.interfaces.*;
 import javax.crypto.spec.*;
 
-import sun.security.rsa.RSAUtil.KeyType;
-import sun.security.rsa.RSAPublicKeyImpl;
-import sun.security.rsa.RSAPrivateCrtKeyImpl;
-
-import sun.security.internal.interfaces.TlsMasterSecret;
-
 import sun.security.pkcs11.wrapper.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.O_GENERATE;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
-import sun.security.util.DerValue;
-import sun.security.util.Length;
-import sun.security.util.ECUtil;
-import sun.security.jca.JCAUtil;
 
 /**
  * Key implementation classes.
@@ -67,7 +57,7 @@ import sun.security.jca.JCAUtil;
  * @author  Andreas Sterbenz
  * @since   1.5
  */
-abstract class P11Key implements Key, Length {
+abstract class P11Key implements Key {
 
     @Serial
     private static final long serialVersionUID = -2575874101938349339L;
@@ -319,7 +309,6 @@ abstract class P11Key implements Key, Length {
     /**
      * Return bit length of the key.
      */
-    @Override
     public int length() {
         return keyLength;
     }
@@ -418,18 +407,6 @@ abstract class P11Key implements Key, Length {
         });
         return new P11PBEKey(session, keyID, algorithm, keyLength,
                 attrs, password, salt, iterationCount);
-    }
-
-    static SecretKey masterSecretKey(Session session, long keyID,
-            String algorithm, int keyLength, CK_ATTRIBUTE[] attrs,
-            int major, int minor) {
-        attrs = getAttributes(session, keyID, attrs, new CK_ATTRIBUTE[] {
-                    new CK_ATTRIBUTE(CKA_TOKEN),
-                    new CK_ATTRIBUTE(CKA_SENSITIVE),
-                    new CK_ATTRIBUTE(CKA_EXTRACTABLE),
-        });
-        return new P11TlsMasterSecretKey(session, keyID, algorithm, keyLength,
-                attrs, major, minor);
     }
 
     // we assume that all components of public keys are always accessible
@@ -593,28 +570,6 @@ abstract class P11Key implements Key, Length {
         }
     }
 
-    @SuppressWarnings("deprecation")
-    private static class P11TlsMasterSecretKey extends P11SecretKey
-            implements TlsMasterSecret {
-        @Serial
-        private static final long serialVersionUID = -1318560923770573441L;
-
-        private final int majorVersion, minorVersion;
-        P11TlsMasterSecretKey(Session session, long keyID, String algorithm,
-                int keyLength, CK_ATTRIBUTE[] attrs, int major, int minor) {
-            super(session, keyID, algorithm, keyLength, attrs);
-            this.majorVersion = major;
-            this.minorVersion = minor;
-        }
-        public int getMajorVersion() {
-            return majorVersion;
-        }
-
-        public int getMinorVersion() {
-            return minorVersion;
-        }
-    }
-
     // impl class for sensitive/unextractable RSA private keys
     static class P11RSAPrivateKeyInternal extends P11PrivateKey {
         @Serial
@@ -755,9 +710,9 @@ abstract class P11Key implements Key, Length {
             token.ensureValid();
             if (encoded == null) {
                 try {
-                    Key newKey = RSAPrivateCrtKeyImpl.newKey
-                        (KeyType.RSA, null, n, e, d, p, q, pe, qe, coeff);
-                    encoded = newKey.getEncoded();
+                    encoded = KeyFactory.getInstance("RSA", P11Util.getSunRsaSignProvider())
+                        .generatePrivate(new RSAPrivateCrtKeySpec(n, e, d, p, q, pe, qe, coeff))
+                        .getEncoded();
                 } catch (GeneralSecurityException e) {
                     throw new ProviderException(e);
                 }
@@ -872,9 +827,9 @@ abstract class P11Key implements Key, Length {
             if (encoded == null) {
                 fetchValues();
                 try {
-                    encoded = RSAPublicKeyImpl.newKey
-                        (KeyType.RSA, null, n, e).getEncoded();
-                } catch (InvalidKeyException e) {
+                    encoded = KeyFactory.getInstance("RSA", P11Util.getSunRsaSignProvider())
+                        .generatePublic(new RSAPublicKeySpec(n, e)).getEncoded();
+                } catch (GeneralSecurityException e) {
                     throw new ProviderException(e);
                 }
             }
@@ -932,9 +887,12 @@ abstract class P11Key implements Key, Length {
             token.ensureValid();
             if (encoded == null) {
                 fetchValues();
-                Key key = new sun.security.provider.DSAPublicKey
-                        (y, params.getP(), params.getQ(), params.getG());
-                encoded = key.getEncoded();
+                try {
+                    encoded = P11DSAKeyFactory.sunDsaKeyFactory().generatePublic(new DSAPublicKeySpec
+                            (y, params.getP(), params.getQ(), params.getG())).getEncoded();
+                } catch (InvalidKeySpecException e) {
+                    throw new ProviderException(e);
+                }
             }
             return encoded;
         }
@@ -1029,9 +987,12 @@ abstract class P11Key implements Key, Length {
             token.ensureValid();
             if (encoded == null) {
                 fetchValues();
-                Key key = new sun.security.provider.DSAPrivateKey
-                        (x, params.getP(), params.getQ(), params.getG());
-                encoded = key.getEncoded();
+                try {
+                    encoded = P11DSAKeyFactory.sunDsaKeyFactory().generatePrivate(new DSAPrivateKeySpec
+                            (x, params.getP(), params.getQ(), params.getG())).getEncoded();
+                } catch (InvalidKeySpecException e) {
+                    throw new ProviderException(e);
+                }
             }
             return encoded;
         }
@@ -1336,7 +1297,7 @@ abstract class P11Key implements Key, Length {
             if (encoded == null) {
                 try {
                     fetchValues();
-                    Key key = ECUtil.generateECPrivateKey(s, params);
+                    Key key = P11ECUtil.generatePrivateKey(s, params);
                     encoded = key.getEncoded();
                 } catch (InvalidKeySpecException e) {
                     throw new ProviderException(e);
@@ -1386,14 +1347,8 @@ abstract class P11Key implements Key, Length {
                 // Check whether the X9.63 encoding of an EC point is wrapped
                 // in an ASN.1 OCTET STRING
                 if (!token.config.getUseEcX963Encoding()) {
-                    DerValue wECPoint = new DerValue(ecKey);
-
-                    if (wECPoint.getTag() != DerValue.tag_OctetString) {
-                        throw new IOException("Could not DER decode EC point." +
-                            " Unexpected tag: " + wECPoint.getTag());
-                    }
                     w = P11ECKeyFactory.decodePoint
-                        (wECPoint.getDataBytes(), params.getCurve());
+                        (DerUtil.decode(DerUtil.TAG_OCTET_STRING, ecKey), params.getCurve());
 
                 } else {
                     w = P11ECKeyFactory.decodePoint(ecKey, params.getCurve());
@@ -1414,7 +1369,7 @@ abstract class P11Key implements Key, Length {
             if (encoded == null) {
                 fetchValues();
                 try {
-                    return ECUtil.x509EncodeECPublicKey(w, params);
+                    return P11ECUtil.x509EncodePublicKey(w, params);
                 } catch (InvalidKeySpecException e) {
                     throw new ProviderException(e);
                 }
@@ -1476,7 +1431,7 @@ final class NativeKeyHolder {
             nativeKeyWrapperSession = s;
             nativeKeyWrapperSession.addObject();
             byte[] iv = new byte[16];
-            JCAUtil.getSecureRandom().nextBytes(iv);
+            P11Util.getSecureRandom().nextBytes(iv);
             nativeKeyWrapperMechanism = new CK_MECHANISM(CKM_AES_CBC_PAD, iv);
         } catch (PKCS11Exception e) {
             // best effort

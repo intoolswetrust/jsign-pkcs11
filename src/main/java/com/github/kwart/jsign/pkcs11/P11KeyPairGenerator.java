@@ -28,19 +28,16 @@ package com.github.kwart.jsign.pkcs11;
 import java.math.BigInteger;
 
 import java.security.*;
+import java.security.interfaces.*;
 import java.security.spec.*;
 
 import javax.crypto.spec.DHParameterSpec;
 
-import sun.security.provider.ParameterCache;
-import static sun.security.util.SecurityProviderConstants.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
-
-import sun.security.rsa.RSAKeyFactory;
 
 /**
  * KeyPairGenerator implementation class. This class currently supports
@@ -279,7 +276,7 @@ final class P11KeyPairGenerator extends KeyPairGeneratorSpi {
                         ((RSAKeyGenParameterSpec)params).getPublicExponent();
                 }
                 try {
-                    RSAKeyFactory.checkKeyLengths(keySize, tmpExponent,
+                    P11Util.checkRSAKeyLengths(keySize, tmpExponent,
                         minKeySize, maxKeySize);
                 } catch (InvalidKeyException e) {
                     throw new InvalidAlgorithmParameterException(e);
@@ -305,14 +302,14 @@ final class P11KeyPairGenerator extends KeyPairGeneratorSpi {
                             keySize + " is not supported");
                     }
 
-                    DHParameterSpec cache =
-                            ParameterCache.getCachedDHParameterSpec(keySize);
-                    // Except 2048 and 3072, not yet support generation of
-                    // parameters bigger than 1024 bits.
-                    if ((cache == null) && (keySize > 1024)) {
+                    // the JDK provider knows which sizes it has parameters for
+                    try {
+                        KeyPairGenerator.getInstance("DH", P11Util.getSunJceProvider())
+                                .initialize(keySize);
+                    } catch (NoSuchAlgorithmException | InvalidParameterException e) {
                         throw new InvalidAlgorithmParameterException(
                                 "Unsupported " + keySize +
-                                "-bit DH parameter generation");
+                                "-bit DH parameter generation", e);
                     }
                 }
             } else {
@@ -352,8 +349,7 @@ final class P11KeyPairGenerator extends KeyPairGeneratorSpi {
                 DSAParameterSpec dsaParams;
                 if (params == null) {
                     try {
-                        dsaParams = ParameterCache.getDSAParameterSpec
-                                (keySize, random);
+                        dsaParams = defaultDSAParams(keySize, random);
                     } catch (GeneralSecurityException e) {
                         throw new ProviderException
                                 ("Could not generate DSA parameters", e);
@@ -376,8 +372,7 @@ final class P11KeyPairGenerator extends KeyPairGeneratorSpi {
                 int privateBits = 0;
                 if (params == null) {
                     try {
-                        dhParams = ParameterCache.getDHParameterSpec
-                                (keySize, random);
+                        dhParams = defaultDHParams(keySize, random);
                         privateBits = getDefDHPrivateExpSize(dhParams);
                     } catch (GeneralSecurityException e) {
                         throw new ProviderException
@@ -434,5 +429,54 @@ final class P11KeyPairGenerator extends KeyPairGeneratorSpi {
         } finally {
             token.releaseSession(session);
         }
+    }
+
+    // JDK defaults, overridable by the jdk.security.defaultKeySize security property
+    private static final int DEF_DSA_KEY_SIZE = defaultKeySize("DSA", 2048);
+    private static final int DEF_RSA_KEY_SIZE = defaultKeySize("RSA", 3072);
+    private static final int DEF_DH_KEY_SIZE = defaultKeySize("DH", 3072);
+    private static final int DEF_EC_KEY_SIZE = defaultKeySize("EC", 384);
+
+    static int defaultKeySize(String algorithm, int defaultValue) {
+        String prop = Security.getProperty("jdk.security.defaultKeySize");
+        if (prop != null) {
+            for (String pair : prop.split(",")) {
+                String[] algoAndValue = pair.split(":");
+                if (algoAndValue.length == 2
+                        && algoAndValue[0].trim().equalsIgnoreCase(algorithm)) {
+                    try {
+                        return Integer.parseInt(algoAndValue[1].trim());
+                    } catch (NumberFormatException e) {
+                        // invalid value, use the default
+                    }
+                }
+            }
+        }
+        return defaultValue;
+    }
+
+    // the JDK providers take these from sun.security.provider.ParameterCache
+    private static DSAParameterSpec defaultDSAParams(int keySize, SecureRandom random)
+            throws GeneralSecurityException {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("DSA", P11Util.getSunProvider());
+        kpg.initialize(keySize, random);
+        DSAParams params = ((DSAPublicKey) kpg.generateKeyPair().getPublic()).getParams();
+        return new DSAParameterSpec(params.getP(), params.getQ(), params.getG());
+    }
+
+    private static DHParameterSpec defaultDHParams(int keySize, SecureRandom random)
+            throws GeneralSecurityException {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("DH", P11Util.getSunJceProvider());
+        kpg.initialize(keySize, random);
+        return ((javax.crypto.interfaces.DHPublicKey) kpg.generateKeyPair().getPublic()).getParams();
+    }
+
+    // the JDK's SafeDHParameterSpec is internal, so assume an unknown group like the JDK does
+    private static int getDefDHPrivateExpSize(DHParameterSpec spec) {
+        if (spec.getL() > 0) {
+            return spec.getL();
+        }
+        int dhGroupSize = spec.getP().bitLength();
+        return Math.max((dhGroupSize >= 2048 ? 1024 : dhGroupSize >> 1), 384);
     }
 }

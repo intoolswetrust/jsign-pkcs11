@@ -37,7 +37,6 @@ import javax.crypto.spec.*;
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
-import sun.security.util.KeyUtil;
 
 /**
  * KeyAgreement implementation class. This class currently supports
@@ -148,7 +147,7 @@ final class P11KeyAgreement extends KeyAgreementSpi {
         if (key instanceof DHPublicKey dhKey) {
 
             // validate the Diffie-Hellman public key
-            KeyUtil.validate(dhKey);
+            P11Util.validateDHPublicKey(dhKey.getParams().getP(), dhKey.getY());
 
             y = dhKey.getY();
             DHParameterSpec params = dhKey.getParams();
@@ -163,7 +162,7 @@ final class P11KeyAgreement extends KeyAgreementSpi {
                         key, DHPublicKeySpec.class);
 
                 // validate the Diffie-Hellman public key
-                KeyUtil.validate(spec);
+                P11Util.validateDHPublicKey(spec.getP(), spec.getY());
 
                 y = spec.getY();
                 p = spec.getP();
@@ -264,7 +263,7 @@ final class P11KeyAgreement extends KeyAgreementSpi {
             throw new NoSuchAlgorithmException("Algorithm must not be null");
         }
 
-        if (KeyUtil.isSupportedKeyAgreementOutputAlgorithm(algorithm)) {
+        if (P11Util.isSupportedKeyAgreementOutputAlgorithm(algorithm)) {
             // For now, only perform native derivation for TlsPremasterSecret
             // and Generic algorithms. TlsPremasterSecret is required for
             // FIPS compliance and Generic is required for input to KDF.

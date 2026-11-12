@@ -27,9 +27,6 @@ package com.github.kwart.jsign.pkcs11;
 
 import java.nio.ByteBuffer;
 
-import jdk.internal.access.JavaNioAccess;
-import jdk.internal.access.SharedSecrets;
-import sun.nio.ch.DirectBuffer;
 
 import java.util.Hashtable;
 import java.security.*;
@@ -38,7 +35,6 @@ import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PSSParameterSpec;
 import java.security.interfaces.*;
 import sun.security.pkcs11.wrapper.*;
-import sun.security.util.KnownOIDs;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
 
@@ -68,7 +64,6 @@ import static sun.security.pkcs11.wrapper.PKCS11Exception.RV.*;
  */
 final class P11PSSSignature extends SignatureSpi {
 
-    private static final JavaNioAccess NIO_ACCESS = SharedSecrets.getJavaNioAccess();
 
     private static final boolean DEBUG = false;
 
@@ -93,12 +88,8 @@ final class P11PSSSignature extends SignatureSpi {
     private static String toStdName(String givenDigestAlg) {
         if (givenDigestAlg == null) return null;
 
-        KnownOIDs given2 = KnownOIDs.findMatch(givenDigestAlg);
-        if (given2 == null) {
-            return givenDigestAlg;
-        } else {
-            return given2.stdName();
-        }
+        String std = DigestAlgorithms.toStdName(givenDigestAlg);
+        return std == null ? givenDigestAlg : std;
     }
 
     // utility method for comparing digest algorithms
@@ -261,7 +252,7 @@ final class P11PSSSignature extends SignatureSpi {
             }
         } finally {
             p11Key.releaseKeyID();
-            mechanism.freeHandle();
+            P11Util.freeMechanism(mechanism);
             session = token.releaseSession(session);
             isActive = false;
         }
@@ -319,7 +310,6 @@ final class P11PSSSignature extends SignatureSpi {
         }
     }
 
-    // CKU_CONTEXT_SPECIFIC login right after C_SignInit; see JSignPKCS11.contextSpecificLogin
     private void contextSpecificLogin(long keyID) {
         try {
             token.provider.contextSpecificLogin(session, p11Key, keyID);
@@ -630,32 +620,8 @@ final class P11PSSSignature extends SignatureSpi {
         isActive = true;
         switch (type) {
             case T_UPDATE -> {
-                if (!(byteBuffer instanceof DirectBuffer dByteBuffer)) {
-                    // cannot do better than default impl
-                    super.engineUpdate(byteBuffer);
-                    return;
-                }
-                int ofs = byteBuffer.position();
-                NIO_ACCESS.acquireSession(byteBuffer);
-                try {
-                    long addr = dByteBuffer.address();
-                    if (mode == M_SIGN) {
-                        if (DEBUG) System.out.println(this + ": Calling C_SignUpdate");
-                        token.p11.C_SignUpdate
-                                (session.id(), addr + ofs, null, 0, len);
-                    } else {
-                        if (DEBUG) System.out.println(this + ": Calling C_VerifyUpdate");
-                        token.p11.C_VerifyUpdate
-                                (session.id(), addr + ofs, null, 0, len);
-                    }
-                    bytesProcessed += len;
-                    byteBuffer.position(ofs + len);
-                } catch (PKCS11Exception e) {
-                    reset(false);
-                    throw new ProviderException("Update failed", e);
-                } finally {
-                    NIO_ACCESS.releaseSession(byteBuffer);
-                }
+                // direct buffer addresses need JDK internals, the default implementation copies
+                super.engineUpdate(byteBuffer);
             }
             case T_DIGEST -> {
                 // should not happen as this should be covered by earlier checks

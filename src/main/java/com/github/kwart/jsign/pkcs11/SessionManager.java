@@ -28,7 +28,6 @@ package com.github.kwart.jsign.pkcs11;
 import java.util.*;
 import java.security.ProviderException;
 
-import sun.security.util.Debug;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 

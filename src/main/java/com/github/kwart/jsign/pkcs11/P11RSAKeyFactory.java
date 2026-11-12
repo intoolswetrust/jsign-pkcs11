@@ -31,14 +31,9 @@ import java.security.*;
 import java.security.interfaces.*;
 import java.security.spec.*;
 
-import sun.security.rsa.RSAPublicKeyImpl;
-import sun.security.rsa.RSAPrivateCrtKeyImpl;
-import sun.security.rsa.RSAUtil.KeyType;
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
-
-import sun.security.rsa.RSAKeyFactory;
 
 /**
  * RSA KeyFactory implementation.
@@ -52,6 +47,15 @@ final class P11RSAKeyFactory extends P11KeyFactory {
         super(token, algorithm);
     }
 
+    // parses encoded keys, replaces the sun.security.rsa key implementations
+    private static KeyFactory sunRsaKeyFactory() {
+        try {
+            return KeyFactory.getInstance("RSA", P11Util.getSunRsaSignProvider());
+        } catch (NoSuchAlgorithmException e) {
+            throw new ProviderException(e);
+        }
+    }
+
     PublicKey implTranslatePublicKey(PublicKey key) throws InvalidKeyException {
         try {
             if (key instanceof RSAPublicKey rsaKey) {
@@ -61,11 +65,11 @@ final class P11RSAKeyFactory extends P11KeyFactory {
                 );
             } else {
                 // let SunRsaSign provider parse for us, then recurse
-                key = RSAPublicKeyImpl.newKey(KeyType.RSA, key.getFormat(),
-                        key.getEncoded());
+                key = sunRsaKeyFactory().generatePublic(
+                        new X509EncodedKeySpec(key.getEncoded()));
                 return implTranslatePublicKey(key);
             }
-        } catch (PKCS11Exception e) {
+        } catch (PKCS11Exception | InvalidKeySpecException e) {
             throw new InvalidKeyException("Could not create RSA public key", e);
         }
     }
@@ -91,11 +95,11 @@ final class P11RSAKeyFactory extends P11KeyFactory {
                 );
             } else {
                 // let SunRsaSign provider parse for us, then recurse
-                key = RSAPrivateCrtKeyImpl.newKey(KeyType.RSA, key.getFormat(),
-                        key.getEncoded());
+                key = sunRsaKeyFactory().generatePrivate(
+                        new PKCS8EncodedKeySpec(key.getEncoded()));
                 return implTranslatePrivateKey(key);
             }
-        } catch (PKCS11Exception e) {
+        } catch (PKCS11Exception | InvalidKeySpecException e) {
             throw new InvalidKeyException("Could not create RSA private key", e);
         }
     }
@@ -106,8 +110,7 @@ final class P11RSAKeyFactory extends P11KeyFactory {
         token.ensureValid();
         if (keySpec instanceof X509EncodedKeySpec) {
             try {
-                PublicKey key = RSAPublicKeyImpl.newKey(KeyType.RSA, "X.509",
-                        ((X509EncodedKeySpec)keySpec).getEncoded());
+                PublicKey key = sunRsaKeyFactory().generatePublic(keySpec);
                 return implTranslatePublicKey(key);
             } catch (InvalidKeyException e) {
                 throw new InvalidKeySpecException
@@ -136,8 +139,7 @@ final class P11RSAKeyFactory extends P11KeyFactory {
         token.ensureValid();
         if (keySpec instanceof PKCS8EncodedKeySpec) {
             try {
-                PrivateKey key = RSAPrivateCrtKeyImpl.newKey(KeyType.RSA,
-                        "PKCS#8", ((PKCS8EncodedKeySpec)keySpec).getEncoded());
+                PrivateKey key = sunRsaKeyFactory().generatePrivate(keySpec);
                 return implTranslatePrivateKey(key);
             } catch (GeneralSecurityException e) {
                 throw new InvalidKeySpecException
@@ -175,7 +177,7 @@ final class P11RSAKeyFactory extends P11KeyFactory {
 
     private PublicKey generatePublic(BigInteger n, BigInteger e)
             throws PKCS11Exception, InvalidKeyException {
-        RSAKeyFactory.checkKeyLengths(n.bitLength(), e, -1, 64 * 1024);
+        P11Util.checkRSAKeyLengths(n.bitLength(), e, -1, 64 * 1024);
         CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
             new CK_ATTRIBUTE(CKA_CLASS, CKO_PUBLIC_KEY),
             new CK_ATTRIBUTE(CKA_KEY_TYPE, CKK_RSA),
@@ -197,7 +199,7 @@ final class P11RSAKeyFactory extends P11KeyFactory {
 
     private PrivateKey generatePrivate(BigInteger n, BigInteger d)
             throws PKCS11Exception, InvalidKeyException {
-        RSAKeyFactory.checkKeyLengths(n.bitLength(), null, -1, 64 * 1024);
+        P11Util.checkRSAKeyLengths(n.bitLength(), null, -1, 64 * 1024);
         CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
             new CK_ATTRIBUTE(CKA_CLASS, CKO_PRIVATE_KEY),
             new CK_ATTRIBUTE(CKA_KEY_TYPE, CKK_RSA),
@@ -221,7 +223,7 @@ final class P11RSAKeyFactory extends P11KeyFactory {
             BigInteger d, BigInteger p, BigInteger q, BigInteger pe,
             BigInteger qe, BigInteger coeff) throws PKCS11Exception,
             InvalidKeyException {
-        RSAKeyFactory.checkKeyLengths(n.bitLength(), e, -1, 64 * 1024);
+        P11Util.checkRSAKeyLengths(n.bitLength(), e, -1, 64 * 1024);
         CK_ATTRIBUTE[] attributes = new CK_ATTRIBUTE[] {
             new CK_ATTRIBUTE(CKA_CLASS, CKO_PRIVATE_KEY),
             new CK_ATTRIBUTE(CKA_KEY_TYPE, CKK_RSA),

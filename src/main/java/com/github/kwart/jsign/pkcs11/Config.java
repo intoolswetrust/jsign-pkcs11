@@ -33,8 +33,6 @@ import java.util.*;
 
 import java.security.*;
 
-import sun.security.util.PropertyExpander;
-
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 import static sun.security.pkcs11.wrapper.CK_ATTRIBUTE.*;
@@ -379,12 +377,57 @@ final class Config {
         return nssOptimizeSpace;
     }
 
-    private static String expand(final String s) throws IOException {
-        try {
-            return PropertyExpander.expand(s);
-        } catch (Exception e) {
-            throw new RuntimeException(e.getMessage(), e);
+    /**
+     * Expands ${property} system property references, ${/} is the file
+     * separator and ${{...}} is kept as is. Same rules as
+     * sun.security.util.PropertyExpander.expand(String).
+     */
+    static String expand(final String s) {
+        if (s == null) {
+            return null;
         }
+        int p = s.indexOf("${");
+        if (p == -1) {
+            return s;
+        }
+        StringBuilder sb = new StringBuilder(s.length());
+        int max = s.length();
+        int i = 0;  // index of the first character not copied yet
+        while (p != -1) {
+            sb.append(s, i, p);
+            int pe = p + 2;
+            if (pe < max && s.charAt(pe) == '{') {
+                // do not expand ${{ ... }}
+                pe = s.indexOf("}}", pe);
+                if (pe == -1 || pe + 2 == max) {
+                    sb.append(s, p, max);
+                    return sb.toString();
+                }
+                pe++;
+                sb.append(s, p, pe + 1);
+            } else {
+                pe = s.indexOf('}', pe);
+                if (pe == -1) {
+                    // no matching '}', keep as normal text
+                    sb.append(s, p, max);
+                    return sb.toString();
+                }
+                String prop = s.substring(p + 2, pe);
+                if (prop.equals("/")) {
+                    sb.append(File.separatorChar);
+                } else {
+                    String val = System.getProperty(prop);
+                    if (val == null) {
+                        throw new RuntimeException("unable to expand property " + prop);
+                    }
+                    sb.append(val);
+                }
+            }
+            i = pe + 1;
+            p = s.indexOf("${", i);
+        }
+        sb.append(s, i, max);
+        return sb.toString();
     }
 
     private void setupTokenizer() {

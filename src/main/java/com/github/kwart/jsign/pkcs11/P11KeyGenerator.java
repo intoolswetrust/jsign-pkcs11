@@ -30,7 +30,6 @@ import java.security.spec.AlgorithmParameterSpec;
 
 import javax.crypto.*;
 
-import sun.security.util.SecurityProviderConstants;
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
@@ -226,8 +225,7 @@ final class P11KeyGenerator extends KeyGeneratorSpi {
                 significantKeySize = 168;
             }
             case (int) CKM_AES_KEY_GEN -> {
-                keySize = adjustKeySize
-                        (SecurityProviderConstants.getDefAESKeySize(), range);
+                keySize = adjustKeySize(getDefAESKeySize(), range);
                 keyType = CKK_AES;
             }
             case (int) CKM_RC4_KEY_GEN -> {
@@ -385,5 +383,17 @@ final class P11KeyGenerator extends KeyGeneratorSpi {
         } finally {
             token.releaseSession(session);
         }
+    }
+
+    // same as sun.security.util.SecurityProviderConstants.getDefAESKeySize()
+    private static int getDefAESKeySize() {
+        int v = P11KeyPairGenerator.defaultKeySize("AES", 256);
+        try {
+            // adjust if crypto policy only allows a smaller value
+            v = Math.min(v, Cipher.getMaxAllowedKeyLength("AES"));
+        } catch (NoSuchAlgorithmException e) {
+            // should never happen; ignore and use the default
+        }
+        return v;
     }
 }

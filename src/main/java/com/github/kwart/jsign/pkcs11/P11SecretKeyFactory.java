@@ -37,7 +37,6 @@ import javax.crypto.spec.*;
 
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
 
-import jdk.internal.access.SharedSecrets;
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
@@ -65,6 +64,13 @@ final class P11SecretKeyFactory extends SecretKeyFactorySpi {
         this.algorithm = algorithm;
         this.svcPbeKi = getPBEKeyInfo(algorithm);
     }
+
+    // removed from the JDK 25 wrapper
+    static final long PCKK_HMAC            = 0x7FFFFF23L;
+    static final long PCKK_SSLMAC          = 0x7FFFFF24L;
+    static final long PCKK_TLSPREMASTER    = 0x7FFFFF25L;
+    static final long PCKK_TLSRSAPREMASTER = 0x7FFFFF26L;
+    static final long PCKK_TLSMASTER       = 0x7FFFFF27L;
 
     private static final Map<String, KeyInfo> keyInfo = new HashMap<>();
     private static final KeyInfo HMAC = new KeyInfo("HMAC", PCKK_HMAC);
@@ -595,15 +601,10 @@ final class P11SecretKeyFactory extends SecretKeyFactorySpi {
 
     private SecretKey generateDESSecret(byte[] keyBytes, String desAlgo)
             throws InvalidKeySpecException {
-        SecretKeySpec secretKeySpec = null;
         try {
-            secretKeySpec = new SecretKeySpec(keyBytes, desAlgo);
-            return engineGenerateSecret(secretKeySpec);
+            // clearing the SecretKeySpec copy needs jdk.internal.access
+            return engineGenerateSecret(new SecretKeySpec(keyBytes, desAlgo));
         } finally {
-            if (secretKeySpec != null) {
-                SharedSecrets.getJavaxCryptoSpecAccess()
-                        .clearSecretKeySpec(secretKeySpec);
-            }
             if (keyBytes != null) {
                 Arrays.fill(keyBytes, (byte) 0);
             }

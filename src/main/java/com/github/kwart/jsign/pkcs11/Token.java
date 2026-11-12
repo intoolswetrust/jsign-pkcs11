@@ -33,7 +33,6 @@ import java.lang.ref.*;
 import java.security.*;
 import javax.security.auth.login.LoginException;
 
-import sun.security.jca.JCAUtil;
 
 import sun.security.pkcs11.wrapper.*;
 import static com.github.kwart.jsign.pkcs11.TemplateManager.*;
@@ -178,7 +177,7 @@ final class Token implements Serializable {
     // return whether the token supports raw secret key material import
     boolean supportsRawSecretKeyImport() {
         if (supportsRawSecretKeyImport == null) {
-            SecureRandom random = JCAUtil.getSecureRandom();
+            SecureRandom random = P11Util.getSecureRandom();
             byte[] encoded = new byte[48];
             random.nextBytes(encoded);
 
@@ -414,7 +413,7 @@ final class Token implements Serializable {
 
     private synchronized byte[] getTokenId() {
         if (tokenId == null) {
-            SecureRandom random = JCAUtil.getSecureRandom();
+            SecureRandom random = P11Util.getSecureRandom();
             tokenId = new byte[20];
             random.nextBytes(tokenId);
             serializedTokens.add(new WeakReference<>(this));

@@ -47,6 +47,15 @@ final class P11DSAKeyFactory extends P11KeyFactory {
         super(token, algorithm);
     }
 
+    // replaces the sun.security.provider DSA key implementations
+    static KeyFactory sunDsaKeyFactory() {
+        try {
+            return KeyFactory.getInstance("DSA", P11Util.getSunProvider());
+        } catch (NoSuchAlgorithmException e) {
+            throw new ProviderException(e);
+        }
+    }
+
     PublicKey implTranslatePublicKey(PublicKey key) throws InvalidKeyException {
         try {
             if (key instanceof DSAPublicKey dsaKey) {
@@ -60,7 +69,11 @@ final class P11DSAKeyFactory extends P11KeyFactory {
             } else if ("X.509".equals(key.getFormat())) {
                 // let Sun provider parse for us, then recurse
                 byte[] encoded = key.getEncoded();
-                key = new sun.security.provider.DSAPublicKey(encoded);
+                try {
+                    key = sunDsaKeyFactory().generatePublic(new X509EncodedKeySpec(encoded));
+                } catch (InvalidKeySpecException e) {
+                    throw new InvalidKeyException(e);
+                }
                 return implTranslatePublicKey(key);
             } else {
                 throw new InvalidKeyException("PublicKey must be instance "
@@ -85,7 +98,11 @@ final class P11DSAKeyFactory extends P11KeyFactory {
             } else if ("PKCS#8".equals(key.getFormat())) {
                 // let Sun provider parse for us, then recurse
                 byte[] encoded = key.getEncoded();
-                key = new sun.security.provider.DSAPrivateKey(encoded);
+                try {
+                    key = sunDsaKeyFactory().generatePrivate(new PKCS8EncodedKeySpec(encoded));
+                } catch (InvalidKeySpecException e) {
+                    throw new InvalidKeyException(e);
+                }
                 return implTranslatePrivateKey(key);
             } else {
                 throw new InvalidKeyException("PrivateKey must be instance "
@@ -103,7 +120,7 @@ final class P11DSAKeyFactory extends P11KeyFactory {
         if (keySpec instanceof X509EncodedKeySpec) {
             try {
                 byte[] encoded = ((X509EncodedKeySpec)keySpec).getEncoded();
-                PublicKey key = new sun.security.provider.DSAPublicKey(encoded);
+                PublicKey key = sunDsaKeyFactory().generatePublic(new X509EncodedKeySpec(encoded));
                 return implTranslatePublicKey(key);
             } catch (InvalidKeyException e) {
                 throw new InvalidKeySpecException
@@ -135,7 +152,7 @@ final class P11DSAKeyFactory extends P11KeyFactory {
         if (keySpec instanceof PKCS8EncodedKeySpec) {
             try {
                 byte[] encoded = ((PKCS8EncodedKeySpec)keySpec).getEncoded();
-                PrivateKey key = new sun.security.provider.DSAPrivateKey(encoded);
+                PrivateKey key = sunDsaKeyFactory().generatePrivate(new PKCS8EncodedKeySpec(encoded));
                 return implTranslatePrivateKey(key);
             } catch (GeneralSecurityException e) {
                 throw new InvalidKeySpecException

@@ -30,8 +30,6 @@ import java.lang.ref.*;
 
 import java.security.Key;
 
-import sun.security.util.Cache;
-
 /**
  * Key to P11Key translation cache. The PKCS#11 token can only perform
  * operations on keys stored on the token (permanently or temporarily). That
@@ -48,12 +46,20 @@ import sun.security.util.Cache;
  */
 final class KeyCache {
 
-    private final Cache<IdentityWrapper, P11Key> strongCache;
+    private static final int STRONG_CACHE_SIZE = 16;
+
+    // LRU cache with strong references, all access is synchronized
+    private final Map<IdentityWrapper, P11Key> strongCache;
 
     private WeakReference<Map<Key,P11Key>> cacheReference;
 
     KeyCache() {
-        strongCache = Cache.newHardMemoryCache(16);
+        strongCache = new LinkedHashMap<>(STRONG_CACHE_SIZE, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<IdentityWrapper, P11Key> eldest) {
+                return size() > STRONG_CACHE_SIZE;
+            }
+        };
     }
 
     private static final class IdentityWrapper {
