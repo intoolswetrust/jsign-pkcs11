@@ -27,7 +27,7 @@
         <softhsm.required>false</softhsm.required>
         <!-- Must be published on keyserver.ubuntu.com or keys.openpgp.org, Central verifies the signatures with it. -->
         <gpg.keyname>E6859CD79F1F3E3BE207555C3409C2FF0184B8FB</gpg.keyname>
-        <junit.version>5.11.4</junit.version>
+        <junit.version>6.1.3</junit.version>
     </properties>
 
     <dependencies>
